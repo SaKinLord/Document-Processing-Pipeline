@@ -1,0 +1,12 @@
+torch>=2.0.0
+torchvision
+transformers>=4.38.0
+accelerate
+surya-ocr
+pillow
+numpy
+opencv-python-headless
+pypdfium2
+einops
+timm
+scipy
