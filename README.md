@@ -4,8 +4,10 @@ A local, deep-learning-based pipeline for extracting structured data from multi-
 
 ## Features
 - **Multi-Format Support:** Handles scanned forms, fax covers, and handwritten notes.
+- **Robust Pre-processing:** Automatic noise removal for clearer scans.
+- **Table Structure Recovery:** Intelligent clustering of text into logical rows (`row_id`).
+- **Layout Awareness:** Refined VLM prompts (`<OCR_WITH_REGION>`) for better structural understanding.
 - **Handwriting Recognition:** Excellent HTR (Handwritten Text Recognition) capabilities.
-- **Layout Awareness:** Detects tables, text blocks, signatures, and logos.
 - **Local Execution:** Runs entirely offline using GPUs.
 - **Scalable Output:** Generates individual JSON files for easy integration.
 
@@ -53,9 +55,10 @@ For each input file `input/document.png`, an output file `output/document.json` 
       "elements": [
         {
           "type": "text",
-          "content": "Extracted text content...",
+          "content": "Line Item 1",
           "bbox": [x1, y1, x2, y2],
-          "confidence": 0.98
+          "confidence": 0.98,
+          "row_id": 5
         },
         {
           "type": "table",
