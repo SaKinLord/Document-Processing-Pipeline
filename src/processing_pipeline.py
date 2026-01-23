@@ -6,7 +6,7 @@ from PIL import Image
 from transformers import AutoProcessor, AutoModelForCausalLM
 from surya.detection import DetectionPredictor
 from surya.recognition import RecognitionPredictor, FoundationPredictor
-from src.utils import load_image, convert_pdf_to_images, crop_image
+from src.utils import load_image, convert_pdf_to_images, crop_image, denoise_image, cluster_text_rows
 
 class DocumentProcessor:
     def __init__(self, device='cuda' if torch.cuda.is_available() else 'cpu'):
@@ -84,6 +84,9 @@ class DocumentProcessor:
         return results
 
     def process_page(self, image, page_num):
+        # 0. Pre-processing: Denoise
+        image = denoise_image(image)
+        
         page_content = {
             "page_number": page_num,
             "elements": []
@@ -95,20 +98,55 @@ class DocumentProcessor:
         ocr_result = predictions[0]
         
         # Add text lines
+        text_elements = []
         for line in ocr_result.text_lines:
-            page_content["elements"].append({
+            text_elements.append({
                 "type": "text",
                 "content": line.text,
                 "bbox": line.bbox, # [x1, y1, x2, y2]
                 "confidence": line.confidence
             })
+            
+        # Apply Table Recovery (Clustering) to text elements
+        clustered_text = cluster_text_rows(text_elements)
+        page_content["elements"].extend(clustered_text)
 
-        # 2. Run Florence-2 for Object Detection (Images, Tables)
-        od_results = self.run_florence(image, "<OD>")
+        # 2. Run Florence-2 for Object Detection and Layout Analysis
         
-        # Filter relevant objects (Primitive filtering)
-        # 2. Run Florence-2 for Object Detection (Images, Tables)
-        # 2a. Generic Object Detection (Task <OD>)
+        # 2a. Layout Analysis with <OCR_WITH_REGION> (Better for regions)
+        # Note: We keep <OD> for general objects, but use this for structure if available
+        layout_results = self.run_florence(image, "<OCR_WITH_REGION>")
+        if '<OCR_WITH_REGION>' in layout_results:
+             # Standard output might be 'quad_boxes' or 'bboxes' depending on post-processing
+             # If quad_boxes, we convert to bbox
+             # Keys likely: 'quad_boxes', 'labels' (labels are the OCR text usually in this task?)
+             # Actually <OCR_WITH_REGION> returns text in 'labels'. We might just want regions.
+             # Alternatively, use <REGION_PROPOSAL> or similar? 
+             # User requested <OCR_WITH_REGION> specifically.
+             # We will store it as 'region' elements.
+             
+             data = layout_results['<OCR_WITH_REGION>']
+             boxes = data.get('quad_boxes', data.get('bboxes', []))
+             labels = data.get('labels', [])
+             
+             for box, label in zip(boxes, labels):
+                 # Convert quad to bbox if length is 8
+                 if len(box) == 8:
+                     xs = box[0::2]
+                     ys = box[1::2]
+                     bbox = [min(xs), min(ys), max(xs), max(ys)]
+                 else:
+                     bbox = box
+                 
+                 # Avoid duplicating dense text if we rely on Surya
+                 # But we add it as 'layout_region' for structure
+                 page_content["elements"].append({
+                     "type": "layout_region",
+                     "bbox": bbox,
+                     "content_hint": label # The text found by Florence
+                 })
+
+        # 2b. Generic Object Detection (Task <OD>)
         od_results = self.run_florence(image, "<OD>")
         
         # Florence-2 OD output format: {'<OD>': {'bboxes': [[x1, y1, x2, y2], ...], 'labels': ['label1', ...]}}
@@ -133,7 +171,7 @@ class DocumentProcessor:
                         "description": caption
                     })
 
-        # 2b. Targeted Phrase Grounding for Semantic Elements (Logos, Seals, Signatures)
+        # 2c. Targeted Phrase Grounding for Semantic Elements (Logos, Seals, Signatures)
         # Task <CAPTION_TO_PHRASE_GROUNDING> requires a text input.
         target_phrases = "logo. seal. signature. graphic."
         pg_results = self.run_florence(image, "<CAPTION_TO_PHRASE_GROUNDING>", text_input=target_phrases)
