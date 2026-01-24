@@ -10,3 +10,4 @@ pypdfium2
 einops
 timm
 scipy
+langdetect

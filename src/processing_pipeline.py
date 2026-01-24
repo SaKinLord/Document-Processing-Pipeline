@@ -6,7 +6,8 @@ from PIL import Image
 from transformers import AutoProcessor, AutoModelForCausalLM
 from surya.detection import DetectionPredictor
 from surya.recognition import RecognitionPredictor, FoundationPredictor
-from src.utils import load_image, convert_pdf_to_images, crop_image, denoise_image, cluster_text_rows
+from langdetect import detect, LangDetectException
+from src.utils import load_image, convert_pdf_to_images, crop_image, denoise_image, cluster_text_rows, is_bbox_too_large
 
 class DocumentProcessor:
     def __init__(self, device='cuda' if torch.cuda.is_available() else 'cpu'):
@@ -83,13 +84,24 @@ class DocumentProcessor:
             
         return results
 
+
+    def detect_language(self, text):
+        try:
+            if text and len(text.strip()) > 20: 
+                return detect(text)
+        except LangDetectException:
+            pass
+        return "en" # Default to English as per user request
+
     def process_page(self, image, page_num):
         # 0. Pre-processing: Denoise
         image = denoise_image(image)
+        width, height = image.width, image.height
         
         page_content = {
             "page_number": page_num,
-            "elements": []
+            "elements": [],
+            "language": "en" # Default to English
         }
 
         # 1. Run Surya OCR for text
@@ -99,6 +111,7 @@ class DocumentProcessor:
         
         # Add text lines
         text_elements = []
+        all_text_content = [] # Aggregate for language ID
         for line in ocr_result.text_lines:
             text_elements.append({
                 "type": "text",
@@ -106,6 +119,11 @@ class DocumentProcessor:
                 "bbox": line.bbox, # [x1, y1, x2, y2]
                 "confidence": line.confidence
             })
+            all_text_content.append(line.text)
+            
+        # Detect Language
+        full_text = " ".join(all_text_content)
+        page_content["language"] = self.detect_language(full_text)
             
         # Apply Table Recovery (Clustering) to text elements
         clustered_text = cluster_text_rows(text_elements)
@@ -117,14 +135,6 @@ class DocumentProcessor:
         # Note: We keep <OD> for general objects, but use this for structure if available
         layout_results = self.run_florence(image, "<OCR_WITH_REGION>")
         if '<OCR_WITH_REGION>' in layout_results:
-             # Standard output might be 'quad_boxes' or 'bboxes' depending on post-processing
-             # If quad_boxes, we convert to bbox
-             # Keys likely: 'quad_boxes', 'labels' (labels are the OCR text usually in this task?)
-             # Actually <OCR_WITH_REGION> returns text in 'labels'. We might just want regions.
-             # Alternatively, use <REGION_PROPOSAL> or similar? 
-             # User requested <OCR_WITH_REGION> specifically.
-             # We will store it as 'region' elements.
-             
              data = layout_results['<OCR_WITH_REGION>']
              boxes = data.get('quad_boxes', data.get('bboxes', []))
              labels = data.get('labels', [])
@@ -138,12 +148,16 @@ class DocumentProcessor:
                  else:
                      bbox = box
                  
-                 # Avoid duplicating dense text if we rely on Surya
-                 # But we add it as 'layout_region' for structure
+                 # Dual OCR Fix: Discard conflicting text
+                 # Only store region type (inferred or generic)
+                 region_type = "region" 
+                 # We could infer type from label if it says "table" or "header" but Florence often returns the text itself.
+                 
                  page_content["elements"].append({
                      "type": "layout_region",
                      "bbox": bbox,
-                     "content_hint": label # The text found by Florence
+                     # "region_type": region_type # Optional
+                     # No content_hint to avoid confusion
                  })
 
         # 2b. Generic Object Detection (Task <OD>)
@@ -156,6 +170,11 @@ class DocumentProcessor:
             
             for bbox, label in zip(bboxes, labels):
                 label_clean = label.lower()
+                
+                # False Positive Filter: Check Size
+                if is_bbox_too_large(bbox, width, height, label=label_clean):
+                    continue
+
                 # Heuristic: Identify non-text visual elements
                 # Added 'human face' based on user data
                 if any(x in label_clean for x in ['image', 'figure', 'chart', 'plot', 'diagram', 'map', 'table', 'picture', 'human face']):
@@ -183,6 +202,10 @@ class DocumentProcessor:
             for bbox, label in zip(bboxes, labels):
                 # Florence returns the matched phrase as the label
                 label_clean = label.lower()
+                
+                # False Positive Filter: Check Size
+                if is_bbox_too_large(bbox, width, height, label=label_clean):
+                    continue
                 
                 # Deduplicate: Check IOA (Intersection over Area) with existing elements to avoid double counting
                 # (Simple check: if center point is inside an existing bbox)

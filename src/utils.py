@@ -151,4 +151,39 @@ def cluster_text_rows(elements, y_threshold=15):
             elem['row_id'] = row_idx
             ordered_elements.append(elem)
             
+            
     return ordered_elements
+
+def is_bbox_too_large(bbox, width, height, label=None):
+    """
+    Checks if a bounding box covers too much of the page area.
+    Uses per-type thresholds.
+    """
+    x1, y1, x2, y2 = bbox
+    area = (x2 - x1) * (y2 - y1)
+    # Using rough approximation if width/height are not passed from pipeline cleanly,
+    # but they should be.
+    # However, pipeline uses PIL image, so pixel coords. 
+    # bbox is also in pixel coords (from Florence) or 0-1000? 
+    # Florence returns pixel coords usually when processed with image size.
+    # Let's assume pixel coords matching width/height.
+    
+    total_area = width * height
+    if total_area == 0:
+        return False
+        
+    ratio = area / total_area
+    
+    # Per-type thresholds
+    AREA_THRESHOLDS = {
+        "human face": 0.10,
+        "signature": 0.25,
+        "logo": 0.30,
+        "graphic": 0.50,
+        "default": 0.50
+    }
+    
+    threshold = AREA_THRESHOLDS.get(label.lower(), AREA_THRESHOLDS["default"]) if label else AREA_THRESHOLDS["default"]
+    
+    return ratio > threshold
+
