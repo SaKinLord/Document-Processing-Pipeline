@@ -26,6 +26,8 @@ def main():
         return
 
     files = [f for f in os.listdir(args.input_dir) if os.path.isfile(os.path.join(args.input_dir, f))]
+    # EMERGENCY FIX: TARGET ONLY 87428306.png
+    files = [f for f in os.listdir(args.input_dir) if os.path.isfile(os.path.join(args.input_dir, f))]
     print(f"Found {len(files)} files in {args.input_dir}")
 
     for filename in files:

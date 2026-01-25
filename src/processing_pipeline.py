@@ -1,18 +1,28 @@
-
 import os
 import torch
 import numpy as np
 from PIL import Image
 from transformers import AutoProcessor, AutoModelForCausalLM
 from surya.detection import DetectionPredictor
+
 from surya.recognition import RecognitionPredictor, FoundationPredictor
 from langdetect import detect, LangDetectException
-from src.utils import load_image, convert_pdf_to_images, crop_image, denoise_image, cluster_text_rows, is_bbox_too_large
+from src.utils import load_image, convert_pdf_to_images, crop_image, denoise_image, cluster_text_rows, is_bbox_too_large, SpellCorrector, classify_document_type
+from src.models.handwriting import HandwritingRecognizer
+from src.models.table import TableRecognizer
+from src.models.layout import LayoutAnalyzer
 
 class DocumentProcessor:
     def __init__(self, device='cuda' if torch.cuda.is_available() else 'cpu'):
         self.device = device
         print(f"Loading models on {self.device}...")
+        
+        # Load Spell Checker
+        domain_dict_path = os.path.join(os.path.dirname(__file__), "resources", "domain_dictionary.txt")
+        self.spell_corrector = SpellCorrector(domain_dict_path=domain_dict_path)
+        
+        # Thresholds
+        self.TEXT_CONFIDENCE_THRESHOLD = 0.4
         
         # Load Florence-2 for VLM tasks (Layout, Captioning)
         self.florence_model_id = "microsoft/Florence-2-large-ft" 
@@ -33,6 +43,12 @@ class DocumentProcessor:
         # RecognitionPredictor requires a FoundationPredictor
         self.rec_foundation = FoundationPredictor()
         self.rec_predictor = RecognitionPredictor(self.rec_foundation)
+        
+        # Load New Specialized Models
+        print("Loading specialized models (TrOCR, TableTransformer, LayoutLMv3)...")
+        self.handwriting_recognizer = HandwritingRecognizer(device=self.device)
+        self.table_recognizer = TableRecognizer(device=self.device)
+        self.layout_analyzer = LayoutAnalyzer(device=self.device)
 
     def run_florence(self, image, task_prompt, text_input=None):
         if image is None:
@@ -104,22 +120,72 @@ class DocumentProcessor:
             "language": "en" # Default to English
         }
 
+        
+        # Detect Document Type (Typed vs Handwritten)
+        doc_type = classify_document_type(image)
+        page_content["document_type"] = doc_type
+        print(f"  Document classification: {doc_type}")
+
         # 1. Run Surya OCR for text
         predictions = self.rec_predictor([image], ['ocr_with_boxes'], self.det_predictor)
-        # predictions is a list of OCRResult
         ocr_result = predictions[0]
+        
+        # Prepare data for LayoutLMv3
+        ocr_words = []
+        ocr_boxes = []
         
         # Add text lines
         text_elements = []
-        all_text_content = [] # Aggregate for language ID
+        all_text_content = [] 
+        
         for line in ocr_result.text_lines:
+            # Filter low confidence hallucinations
+            if line.confidence < self.TEXT_CONFIDENCE_THRESHOLD:
+                continue
+            
+            final_text = line.text
+            # Hybrid Approach: 
+            # 1. If document is handwritten, use TrOCR for everything.
+            # 2. If typed, but this specific line has low confidence or contains no alphanumeric text, try TrOCR.
+            # Note: doc_type "typed" is the default.
+            
+            run_handwriting_model = False
+            if doc_type == "handwritten":
+                run_handwriting_model = True
+            elif doc_type == "typed" and line.confidence < 0.6:
+                 # Check if the text actually looks like noise or empty
+                 if len(line.text.strip()) > 0:
+                     run_handwriting_model = True
+            
+            if run_handwriting_model:
+               # Crop the line area
+               line_crop = crop_image(image, line.bbox)
+               # Use TrOCR
+               hw_text = self.handwriting_recognizer.recognize(line_crop)
+               if hw_text and len(hw_text.strip()) > 0:
+                   final_text = hw_text
+                   # print(f"  [TrOCR] Replaced '{line.text}' with '{final_text}'")
+
+            # Apply Spell Correction (Re-enabled with safer whitelist approach)
+            corrected_text = self.spell_corrector.correct_text(final_text)
+            # corrected_text = final_text
+            
             text_elements.append({
                 "type": "text",
-                "content": line.text,
-                "bbox": line.bbox, # [x1, y1, x2, y2]
-                "confidence": line.confidence
+                "content": corrected_text,
+                "bbox": line.bbox, 
+                "confidence": line.confidence,
+                "source_model": "surya" if final_text == line.text else "trocr"
             })
-            all_text_content.append(line.text)
+            all_text_content.append(corrected_text)
+            
+            # Collect for Layout Analysis
+            # Split text into words for LayoutLMv3, reusing the line bbox 
+            # (Approximation: Ideally we have word-level bboxes, but line-level is acceptable for region layout)
+            line_words = corrected_text.split()
+            ocr_words.extend(line_words)
+            ocr_boxes.extend([line.bbox] * len(line_words))
+
             
         # Detect Language
         full_text = " ".join(all_text_content)
@@ -129,36 +195,65 @@ class DocumentProcessor:
         clustered_text = cluster_text_rows(text_elements)
         page_content["elements"].extend(clustered_text)
 
-        # 2. Run Florence-2 for Object Detection and Layout Analysis
+        # 2. Layout Analysis: LayoutLMv3 (Primary) instead of Florence
+        try:
+            print("  Running LayoutLMv3...")
+            layout_regions = self.layout_analyzer.analyze_layout(image, ocr_words, ocr_boxes)
+            # Consolidate nearby regions or just add them
+            # LayoutLMv3 returns word-level labels. We need to aggregate them into regions.
+            # Simple heuristic: Group consecutive words with same label.
+            
+            current_region = None
+            for item in layout_regions:
+                label = item['label']
+                if label == 'O': continue 
+                
+                if current_region and current_region['type'] == label:
+                    # Extend bbox
+                    b = item['bbox']
+                    current_region['bbox'] = [
+                        min(current_region['bbox'][0], b[0]),
+                        min(current_region['bbox'][1], b[1]),
+                        max(current_region['bbox'][2], b[2]),
+                        max(current_region['bbox'][3], b[3])
+                    ]
+                else:
+                    if current_region:
+                        page_content["elements"].append(current_region)
+                    current_region = {
+                        "type": "layout_region",
+                        "region_type": label,
+                        "bbox": item['bbox']
+                    }
+            if current_region:
+                page_content["elements"].append(current_region)
+                
+        except Exception as e:
+            print(f"  LayoutLMv3 failed: {e}")
+            # Fallback? No, Florence often crashes OOM.
+            
+        # 3. Targeted Object Detection (Florence-2) - CAREFUL MEMORY USE
+        torch.cuda.empty_cache() # Crucial for T4 16GB
         
-        # 2a. Layout Analysis with <OCR_WITH_REGION> (Better for regions)
-        # Note: We keep <OD> for general objects, but use this for structure if available
-        layout_results = self.run_florence(image, "<OCR_WITH_REGION>")
-        if '<OCR_WITH_REGION>' in layout_results:
-             data = layout_results['<OCR_WITH_REGION>']
-             boxes = data.get('quad_boxes', data.get('bboxes', []))
-             labels = data.get('labels', [])
-             
-             for box, label in zip(boxes, labels):
-                 # Convert quad to bbox if length is 8
-                 if len(box) == 8:
-                     xs = box[0::2]
-                     ys = box[1::2]
-                     bbox = [min(xs), min(ys), max(xs), max(ys)]
-                 else:
-                     bbox = box
-                 
-                 # Dual OCR Fix: Discard conflicting text
-                 # Only store region type (inferred or generic)
-                 region_type = "region" 
-                 # We could infer type from label if it says "table" or "header" but Florence often returns the text itself.
-                 
-                 page_content["elements"].append({
-                     "type": "layout_region",
-                     "bbox": bbox,
-                     # "region_type": region_type # Optional
-                     # No content_hint to avoid confusion
-                 })
+        # Only run OD if really needed (Tables are handled by TableTransformer - coming soon)
+        # Actually, let's run TableTransformer here instead of Florence for tables
+        try:
+            print("  Running Table Transformer...")
+            tables = self.table_recognizer.detect_tables(image)
+            for table in tables:
+                page_content["elements"].append({
+                    "type": "table",
+                    "bbox": table['bbox'],
+                    "confidence": table['confidence']
+                })
+        except Exception as e:
+             print(f"  Table detection failed: {e}")
+
+        # Disable broad Florence OD to save memory for now, or ensure we clear cache
+        # od_results = self.run_florence(image, "<OD>") ... (Skipping to prevent OOM)
+        
+        # Note: If user specifically needs Florence, we need to offload others first. 
+        # For now, prioritizing Robustness (No crash) over extra detection.
 
         # 2b. Generic Object Detection (Task <OD>)
         od_results = self.run_florence(image, "<OD>")

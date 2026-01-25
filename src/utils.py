@@ -1,7 +1,11 @@
 
-
 import os
+import cv2
+import numpy as np
 from PIL import Image
+from sklearn.cluster import AgglomerativeClustering
+from spellchecker import SpellChecker
+import re
 import pypdfium2 as pdfium
 import numpy as np
 import io
@@ -185,5 +189,145 @@ def is_bbox_too_large(bbox, width, height, label=None):
     
     threshold = AREA_THRESHOLDS.get(label.lower(), AREA_THRESHOLDS["default"]) if label else AREA_THRESHOLDS["default"]
     
+
     return ratio > threshold
+
+
+class SpellCorrector:
+    def __init__(self, domain_dict_path=None):
+        self.spell = SpellChecker()
+        self.domain_words = set()
+        
+        if domain_dict_path and os.path.exists(domain_dict_path):
+            try:
+                with open(domain_dict_path, 'r') as f:
+                    content = f.read()
+                    # Add to both local set and pyspellchecker
+                    for line in content.splitlines():
+                        word = line.strip()
+                        if word:
+                            self.spell.word_frequency.load_words([word])
+                            self.domain_words.add(word.lower()) 
+            except Exception as e:
+                print(f"Warning: Could not load domain dictionary: {e}")
+
+    def _preserve_case(self, original, corrected):
+        if original.isupper():
+            return corrected.upper()
+        if original.istitle():
+            return corrected.title()
+        return corrected.lower()
+
+    def correct_text(self, text):
+        if not text:
+            return text
+            
+        words = text.split()
+        corrected_words = []
+        
+        for word in words:
+            # Skip logic:
+            # 1. Short words (<4 chars) - User requested skip < 4
+            if len(word) < 4:
+                corrected_words.append(word)
+                continue
+                
+            # 2. Contains digits (e.g. T07281A)
+            if any(char.isdigit() for char in word):
+                corrected_words.append(word)
+                continue
+                
+            # Clean punctuation for checking
+            clean_word = re.sub(r'^[^\w]+|[^\w]+$', '', word)
+            if not clean_word:
+                corrected_words.append(word)
+                continue
+            
+            # 3. Starts with Uppercase (Skip proper nouns/Acronyms)
+            if clean_word[0].isupper():
+                corrected_words.append(word)
+                continue
+
+            # 4. Domain Dictionary Check
+            if clean_word.lower() in self.domain_words:
+                 corrected_words.append(word)
+                 continue
+
+            # 5. Generic Dictionary Check (pyspellchecker)
+            if clean_word.lower() in self.spell:
+                corrected_words.append(word)
+                continue
+            
+            # Attempt correction for remaining words
+            try:
+                # Get candidates
+                candidates = self.spell.candidates(clean_word)
+                if not candidates:
+                    corrected_words.append(word)
+                    continue
+                    
+                best_candidate = self.spell.correction(clean_word)
+                
+                if best_candidate and best_candidate != clean_word:
+                    # Apply correction
+                    final_word = self._preserve_case(clean_word, best_candidate)
+                    
+                    # Re-attach punctuation
+                    prefix = word[:word.find(clean_word)]
+                    suffix = word[word.find(clean_word)+len(clean_word):]
+                    corrected_words.append(prefix + final_word + suffix)
+                else:
+                    corrected_words.append(word)
+            except Exception:
+                 corrected_words.append(word)
+                
+        return " ".join(corrected_words)
+
+def classify_document_type(image):
+    """
+    Classify document as typed or handwritten based on text line characteristics.
+    Returns: "typed" or "handwritten"
+    """
+    try:
+        # Convert to grayscale
+        img_np = np.array(image)
+        if len(img_np.shape) == 3:
+            gray = cv2.cvtColor(img_np, cv2.COLOR_RGB2GRAY)
+        else:
+            gray = img_np
+        
+        # Detect edges
+        edges = cv2.Canny(gray, 50, 150)
+        
+        # Find contours
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        # Analyze contour characteristics
+        angles = []
+        sizes = []
+        
+        for contour in contours:
+            if cv2.contourArea(contour) > 50:
+                # Fit ellipse to get angle
+                if len(contour) >= 5:
+                    ellipse = cv2.fitEllipse(contour)
+                    angles.append(ellipse[2])
+                    sizes.append(cv2.contourArea(contour))
+        
+        if not angles:
+            return "typed"
+        
+        # Handwriting tends to have high angle variance
+        angle_variance = np.var(angles)
+        # size_variance = np.var(sizes) / (np.mean(sizes) + 1)
+        
+        # Thresholds determined empirically (from Spec Report & Verification)
+        # 1077 (Jittery Typed) < Threshold < 2024 (Handwritten)
+        if angle_variance > 1200:
+            return "handwritten"
+        
+        return "typed"
+    except Exception as e:
+        print(f"Warning: Document classification failed, defaulting to typed. Error: {e}")
+        return "typed"
 

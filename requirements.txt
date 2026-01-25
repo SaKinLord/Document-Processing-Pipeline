@@ -1,13 +1,16 @@
 torch>=2.0.0
 torchvision
-transformers>=4.38.0
 accelerate
-surya-ocr
-pillow
-numpy
-opencv-python-headless
-pypdfium2
+scikit-learn>=1.0.0
+surya-ocr>=0.4.0
+Pillow>=10.0.0
+numpy>=1.21.0
+opencv-python-headless>=4.0.0
+pypdfium2>=4.0.0
 einops
 timm
 scipy
-langdetect
+langdetect>=1.0.0
+pyspellchecker>=0.7.0
+transformers>=4.38.0
+# detectron2 # Left commented as it requires specific build steps on Windows
