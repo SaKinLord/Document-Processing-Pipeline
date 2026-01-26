@@ -121,10 +121,11 @@ class DocumentProcessor:
         }
 
         
-        # Detect Document Type (Typed vs Handwritten)
-        doc_type = classify_document_type(image)
+        # Detect Document Type (Typed vs Handwritten) - Now returns (type, confidence)
+        doc_type, doc_confidence = classify_document_type(image)
         page_content["document_type"] = doc_type
-        print(f"  Document classification: {doc_type}")
+        page_content["classification_confidence"] = doc_confidence
+        print(f"  Document classification: {doc_type} (confidence: {doc_confidence:.2f})")
 
         # 1. Run Surya OCR for text
         predictions = self.rec_predictor([image], ['ocr_with_boxes'], self.det_predictor)
@@ -144,27 +145,48 @@ class DocumentProcessor:
                 continue
             
             final_text = line.text
-            # Hybrid Approach: 
-            # 1. If document is handwritten, use TrOCR for everything.
-            # 2. If typed, but this specific line has low confidence or contains no alphanumeric text, try TrOCR.
-            # Note: doc_type "typed" is the default.
+            source_model = "surya"
+            
+            # Improved Hybrid Approach based on classification confidence:
+            # 1. If "handwritten" with high confidence -> use TrOCR
+            # 2. If "typed" with high confidence -> use Surya
+            # 3. If "mixed" or low confidence -> run both, take best result
             
             run_handwriting_model = False
-            if doc_type == "handwritten":
-                run_handwriting_model = True
-            elif doc_type == "typed" and line.confidence < 0.6:
-                 # Check if the text actually looks like noise or empty
-                 if len(line.text.strip()) > 0:
-                     run_handwriting_model = True
+            use_ensemble = False
             
-            if run_handwriting_model:
+            if doc_type == "handwritten" and doc_confidence >= 0.6:
+                run_handwriting_model = True
+            elif doc_type == "mixed" or doc_confidence < 0.6:
+                # Uncertain classification - use ensemble approach
+                use_ensemble = True
+            elif doc_type == "typed" and line.confidence < 0.6:
+                # Typed document but low-confidence line - try TrOCR
+                if len(line.text.strip()) > 0:
+                    run_handwriting_model = True
+            
+            if use_ensemble:
+                # Run both OCR engines, pick the one with higher confidence
+                line_crop = crop_image(image, line.bbox)
+                hw_text = self.handwriting_recognizer.recognize(line_crop)
+                
+                # Compare: prefer Surya if confidence is high, else use TrOCR
+                if line.confidence >= 0.8:
+                    final_text = line.text
+                    source_model = "surya"
+                elif hw_text and len(hw_text.strip()) > 0:
+                    final_text = hw_text
+                    source_model = "trocr"
+                # else keep surya result
+                    
+            elif run_handwriting_model:
                # Crop the line area
                line_crop = crop_image(image, line.bbox)
                # Use TrOCR
                hw_text = self.handwriting_recognizer.recognize(line_crop)
                if hw_text and len(hw_text.strip()) > 0:
                    final_text = hw_text
-                   # print(f"  [TrOCR] Replaced '{line.text}' with '{final_text}'")
+                   source_model = "trocr"
 
             # Apply Spell Correction (Re-enabled with safer whitelist approach)
             corrected_text = self.spell_corrector.correct_text(final_text)
@@ -175,7 +197,7 @@ class DocumentProcessor:
                 "content": corrected_text,
                 "bbox": line.bbox, 
                 "confidence": line.confidence,
-                "source_model": "surya" if final_text == line.text else "trocr"
+                "source_model": source_model
             })
             all_text_content.append(corrected_text)
             

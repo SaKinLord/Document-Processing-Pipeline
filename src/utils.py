@@ -285,8 +285,17 @@ class SpellCorrector:
 
 def classify_document_type(image):
     """
-    Classify document as typed or handwritten based on text line characteristics.
-    Returns: "typed" or "handwritten"
+    Classify document as typed, handwritten, or mixed based on multiple features.
+    
+    Returns: tuple (doc_type: str, confidence: float)
+        - doc_type: "typed", "handwritten", or "mixed"
+        - confidence: 0.0 to 1.0
+    
+    Features used:
+    1. Stroke width variance (typed = uniform, handwritten = variable)
+    2. Line regularity (typed = horizontal, handwritten = slanted)
+    3. Edge density patterns
+    4. Contour angle variance (original feature)
     """
     try:
         # Convert to grayscale
@@ -296,38 +305,301 @@ def classify_document_type(image):
         else:
             gray = img_np
         
+        # Resize for consistent analysis
+        h, w = gray.shape
+        if w > 1000:
+            scale = 1000 / w
+            gray = cv2.resize(gray, (0, 0), fx=scale, fy=scale)
+        
+        # Feature 1: Stroke Width Variance
+        stroke_score = _calculate_stroke_variance(gray)
+        
+        # Feature 2: Line Regularity (horizontal alignment)
+        line_score = _calculate_line_regularity(gray)
+        
+        # Feature 3: Contour Angle Variance
+        angle_score = _calculate_angle_variance(gray)
+        
+        # Feature 4: Edge density ratio
+        edge_score = _calculate_edge_density(gray)
+        
+        # NEW Feature 5: Form structure detection (lines, boxes)
+        form_score = _detect_form_structure(gray)
+        
+        # NEW Feature 6: Character uniformity
+        uniformity_score = _calculate_character_uniformity(gray)
+        
+        # Weighted voting for "typed"
+        # Higher score = more likely typed
+        typed_score = 0.0
+        
+        # Stroke variance: low = typed
+        if stroke_score < 0.3:
+            typed_score += 0.25
+        elif stroke_score < 0.5:
+            typed_score += 0.12
+        
+        # Line regularity: high = typed (reduced weight)
+        if line_score > 0.7:
+            typed_score += 0.15
+        elif line_score > 0.5:
+            typed_score += 0.08
+        
+        # Angle variance: low = typed
+        if angle_score < 800:
+            typed_score += 0.20
+        elif angle_score < 1200:
+            typed_score += 0.08
+        
+        # Edge density: moderate = typed
+        if 0.02 < edge_score < 0.15:
+            typed_score += 0.10
+        elif edge_score < 0.02:
+            typed_score += 0.05
+        
+        # NEW: Form structure - strong indicator of typed/form document
+        if form_score > 0.5:
+            typed_score += 0.25  # Strong form structure
+        elif form_score > 0.2:
+            typed_score += 0.15  # Some form elements
+        
+        # NEW: Character uniformity - typed has uniform heights
+        if uniformity_score > 0.7:
+            typed_score += 0.15
+        elif uniformity_score > 0.4:
+            typed_score += 0.08
+        
+        # Determine classification with confidence
+        # Threshold: typed >= 0.70, handwritten <= 0.30, else mixed
+        if typed_score >= 0.70:
+            return ("typed", min(typed_score, 0.95))
+        elif typed_score <= 0.30:
+            return ("handwritten", min(1.0 - typed_score, 0.95))
+        else:
+            # Uncertain - classify as mixed (will use ensemble OCR)
+            return ("mixed", 0.5)
+            
+    except Exception as e:
+        print(f"Warning: Document classification failed, defaulting to mixed. Error: {e}")
+        return ("mixed", 0.3)
+
+
+def _calculate_stroke_variance(gray):
+    """
+    Calculate stroke width variance using distance transform.
+    Low variance = typed, high variance = handwritten.
+    Returns: 0.0 (uniform) to 1.0 (variable)
+    """
+    try:
+        # Binarize
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        
+        # Distance transform to find stroke widths
+        dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
+        
+        # Get non-zero stroke widths
+        stroke_widths = dist[dist > 0]
+        
+        if len(stroke_widths) < 100:
+            return 0.5  # Not enough data
+        
+        # Calculate coefficient of variation (normalized variance)
+        mean_width = np.mean(stroke_widths)
+        if mean_width < 0.1:
+            return 0.5
+            
+        cv_score = np.std(stroke_widths) / mean_width
+        
+        # Normalize to 0-1 range (cv of 0.5+ is highly variable)
+        return min(cv_score / 0.5, 1.0)
+        
+    except Exception:
+        return 0.5
+
+
+def _calculate_line_regularity(gray):
+    """
+    Calculate how horizontal/regular text lines are.
+    High regularity = typed, low = handwritten.
+    Returns: 0.0 (irregular) to 1.0 (regular)
+    """
+    try:
         # Detect edges
         edges = cv2.Canny(gray, 50, 150)
         
-        # Find contours
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Hough line detection
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=50, 
+                                minLineLength=30, maxLineGap=10)
         
-        # Analyze contour characteristics
+        if lines is None or len(lines) < 5:
+            return 0.5
+        
+        # Calculate angles of detected lines
         angles = []
-        sizes = []
-        
-        for contour in contours:
-            if cv2.contourArea(contour) > 50:
-                # Fit ellipse to get angle
-                if len(contour) >= 5:
-                    ellipse = cv2.fitEllipse(contour)
-                    angles.append(ellipse[2])
-                    sizes.append(cv2.contourArea(contour))
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            if x2 - x1 != 0:
+                angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
+                angles.append(abs(angle))
         
         if not angles:
-            return "typed"
+            return 0.5
         
-        # Handwriting tends to have high angle variance
-        angle_variance = np.var(angles)
-        # size_variance = np.var(sizes) / (np.mean(sizes) + 1)
+        # Count near-horizontal lines (within 5 degrees)
+        horizontal_count = sum(1 for a in angles if a < 5 or a > 175)
+        regularity = horizontal_count / len(angles)
         
-        # Thresholds determined empirically (from Spec Report & Verification)
-        # 1077 (Jittery Typed) < Threshold < 2024 (Handwritten)
-        if angle_variance > 1200:
-            return "handwritten"
+        return regularity
         
-        return "typed"
-    except Exception as e:
-        print(f"Warning: Document classification failed, defaulting to typed. Error: {e}")
-        return "typed"
+    except Exception:
+        return 0.5
 
+
+def _calculate_angle_variance(gray):
+    """
+    Original angle variance calculation from contour fitting.
+    Returns raw variance value (lower = more typed).
+    """
+    try:
+        edges = cv2.Canny(gray, 50, 150)
+        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        
+        angles = []
+        for contour in contours:
+            if cv2.contourArea(contour) > 50 and len(contour) >= 5:
+                ellipse = cv2.fitEllipse(contour)
+                angles.append(ellipse[2])
+        
+        if not angles:
+            return 1000  # Default middle value
+        
+        return np.var(angles)
+        
+    except Exception:
+        return 1000
+
+
+def _calculate_edge_density(gray):
+    """
+    Calculate edge density ratio.
+    Returns: ratio of edge pixels to total pixels.
+    """
+    try:
+        edges = cv2.Canny(gray, 50, 150)
+        edge_pixels = np.count_nonzero(edges)
+        total_pixels = edges.shape[0] * edges.shape[1]
+        
+        return edge_pixels / total_pixels if total_pixels > 0 else 0.0
+        
+    except Exception:
+        return 0.1
+
+
+def _detect_form_structure(gray):
+    """
+    Detect horizontal/vertical lines indicating form structure.
+    Forms, faxes, and letterheads have distinctive line patterns.
+    Returns: 0.0 (no structure) to 1.0 (strong form structure)
+    """
+    try:
+        # Binarize
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        
+        # Detect horizontal lines using morphology
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
+        horizontal_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horizontal_kernel)
+        
+        # Detect vertical lines using morphology
+        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
+        vertical_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, vertical_kernel)
+        
+        # Count line pixels
+        h_line_pixels = np.count_nonzero(horizontal_lines)
+        v_line_pixels = np.count_nonzero(vertical_lines)
+        total_line_pixels = h_line_pixels + v_line_pixels
+        
+        total_pixels = gray.shape[0] * gray.shape[1]
+        
+        # Normalize: typical form has ~0.5-2% line coverage
+        line_ratio = total_line_pixels / total_pixels if total_pixels > 0 else 0
+        
+        # Scale to 0-1 (0.01 = strong form indicator)
+        form_score = min(line_ratio / 0.01, 1.0)
+        
+        return form_score
+        
+    except Exception:
+        return 0.0
+
+
+def _calculate_text_density(gray):
+    """
+    Calculate text/content density.
+    Sparse content = likely a form template, Dense = handwritten or full typed doc.
+    Returns: 0.0 (sparse) to 1.0 (dense)
+    """
+    try:
+        # Binarize
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        
+        # Count text pixels
+        text_pixels = np.count_nonzero(binary)
+        total_pixels = gray.shape[0] * gray.shape[1]
+        
+        # Typical document has 2-10% text coverage
+        text_ratio = text_pixels / total_pixels if total_pixels > 0 else 0
+        
+        # Normalize: 0.10 = dense text
+        density = min(text_ratio / 0.10, 1.0)
+        
+        return density
+        
+    except Exception:
+        return 0.5
+
+
+def _calculate_character_uniformity(gray):
+    """
+    Calculate character height uniformity.
+    Typed text has uniform character heights; handwritten varies.
+    Returns: 0.0 (variable = handwritten) to 1.0 (uniform = typed)
+    """
+    try:
+        # Binarize
+        _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        
+        # Find connected components (characters)
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        
+        if num_labels < 10:
+            return 0.5  # Not enough data
+        
+        # Get heights of components (excluding background and very small noise)
+        heights = []
+        for i in range(1, num_labels):
+            h = stats[i, cv2.CC_STAT_HEIGHT]
+            area = stats[i, cv2.CC_STAT_AREA]
+            # Filter: reasonable character size
+            if 5 < h < gray.shape[0] // 3 and area > 20:
+                heights.append(h)
+        
+        if len(heights) < 10:
+            return 0.5
+        
+        # Calculate coefficient of variation (lower = more uniform)
+        mean_height = np.mean(heights)
+        std_height = np.std(heights)
+        
+        if mean_height < 1:
+            return 0.5
+            
+        cv_score = std_height / mean_height
+        
+        # Normalize: cv of 0.3+ is highly variable (handwritten)
+        # cv of 0.1 or less is very uniform (typed)
+        uniformity = max(0, 1.0 - (cv_score / 0.4))
+        
+        return min(uniformity, 1.0)
+        
+    except Exception:
+        return 0.5
