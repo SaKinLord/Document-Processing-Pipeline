@@ -95,12 +95,344 @@ def filter_empty_regions(elements: List[Dict]) -> List[Dict]:
     return filtered
 
 
+# ============================================================================
+# Structural Validation Filter for Tables
+# ============================================================================
+
+# Configuration thresholds (tunable)
+MIN_COLUMNS = 2          # Minimum columns to be considered a table
+MIN_ROWS = 2             # Minimum rows to be considered a table
+MIN_TEXT_DENSITY = 0.03  # 3% minimum text coverage
+MAX_TEXT_DENSITY = 0.80  # 80% maximum (too dense = overlapping)
+MIN_STRUCTURE_SCORE = 50 # Minimum score to keep as table
+COLUMN_CLUSTER_TOLERANCE = 40  # Pixels for column clustering
+ROW_CLUSTER_TOLERANCE = 15     # Pixels for row clustering
+
+
+def calculate_text_density(table_bbox: List[float], text_bboxes: List[List[float]]) -> float:
+    """
+    Calculate ratio of text area to table area.
+    
+    Args:
+        table_bbox: Table bounding box [x1, y1, x2, y2]
+        text_bboxes: List of text bounding boxes inside the table
+        
+    Returns:
+        Density ratio (0.0 to 1.0)
+    """
+    if len(table_bbox) != 4:
+        return 0.0
+    
+    table_area = (table_bbox[2] - table_bbox[0]) * (table_bbox[3] - table_bbox[1])
+    if table_area <= 0:
+        return 0.0
+    
+    total_text_area = 0.0
+    for bbox in text_bboxes:
+        if len(bbox) >= 4:
+            width = bbox[2] - bbox[0]
+            height = bbox[3] - bbox[1]
+            if width > 0 and height > 0:
+                total_text_area += width * height
+    
+    return min(total_text_area / table_area, 1.0)
+
+
+def cluster_positions(positions: List[float], tolerance: float) -> List[List[float]]:
+    """
+    Cluster similar positions together.
+    
+    Args:
+        positions: List of coordinate values
+        tolerance: Maximum distance to be in same cluster
+        
+    Returns:
+        List of clusters (each cluster is list of positions)
+    """
+    if not positions:
+        return []
+    
+    sorted_pos = sorted(positions)
+    clusters = [[sorted_pos[0]]]
+    
+    for pos in sorted_pos[1:]:
+        # Check if this position belongs to the last cluster
+        if abs(pos - clusters[-1][-1]) <= tolerance:
+            clusters[-1].append(pos)
+        else:
+            clusters.append([pos])
+    
+    return clusters
+
+
+def detect_column_alignment(table_bbox: List[float], text_bboxes: List[List[float]]) -> Tuple[int, List[float]]:
+    """
+    Detect column structure by clustering text X-positions.
+    
+    Args:
+        table_bbox: Table bounding box
+        text_bboxes: Text bboxes inside the table
+        
+    Returns:
+        Tuple of (num_columns, column_center_positions)
+    """
+    if not text_bboxes:
+        return 0, []
+    
+    # Get left edge (x1) of each text element
+    x_positions = [bbox[0] for bbox in text_bboxes if len(bbox) >= 4]
+    
+    if not x_positions:
+        return 0, []
+    
+    clusters = cluster_positions(x_positions, COLUMN_CLUSTER_TOLERANCE)
+    
+    # Get center position of each cluster
+    column_centers = [sum(c) / len(c) for c in clusters]
+    
+    return len(clusters), column_centers
+
+
+def detect_row_alignment(table_bbox: List[float], text_bboxes: List[List[float]]) -> Tuple[int, List[float]]:
+    """
+    Detect row structure by clustering text Y-positions.
+    
+    Args:
+        table_bbox: Table bounding box
+        text_bboxes: Text bboxes inside the table
+        
+    Returns:
+        Tuple of (num_rows, row_center_positions)
+    """
+    if not text_bboxes:
+        return 0, []
+    
+    # Get top edge (y1) of each text element
+    y_positions = [bbox[1] for bbox in text_bboxes if len(bbox) >= 4]
+    
+    if not y_positions:
+        return 0, []
+    
+    clusters = cluster_positions(y_positions, ROW_CLUSTER_TOLERANCE)
+    
+    # Get center position of each cluster
+    row_centers = [sum(c) / len(c) for c in clusters]
+    
+    return len(clusters), row_centers
+
+
+def check_grid_coverage(text_bboxes: List[List[float]], 
+                        column_centers: List[float], 
+                        row_centers: List[float]) -> float:
+    """
+    Check how well text elements cover the grid (columns x rows).
+    
+    A real table should have text in multiple cells across the grid.
+    
+    Returns:
+        Coverage ratio (0.0 to 1.0)
+    """
+    if len(column_centers) < 2 or len(row_centers) < 2:
+        return 0.0
+    
+    # Create a grid of expected cells
+    total_cells = len(column_centers) * len(row_centers)
+    
+    # Count occupied cells
+    occupied_cells = set()
+    for bbox in text_bboxes:
+        if len(bbox) < 4:
+            continue
+        
+        text_x = (bbox[0] + bbox[2]) / 2  # Center X
+        text_y = (bbox[1] + bbox[3]) / 2  # Center Y
+        
+        # Find which column this text belongs to
+        col_idx = -1
+        min_col_dist = float('inf')
+        for i, col_x in enumerate(column_centers):
+            dist = abs(text_x - col_x)
+            if dist < min_col_dist and dist < COLUMN_CLUSTER_TOLERANCE * 2:
+                min_col_dist = dist
+                col_idx = i
+        
+        # Find which row this text belongs to
+        row_idx = -1
+        min_row_dist = float('inf')
+        for i, row_y in enumerate(row_centers):
+            dist = abs(text_y - row_y)
+            if dist < min_row_dist and dist < ROW_CLUSTER_TOLERANCE * 2:
+                min_row_dist = dist
+                row_idx = i
+        
+        if col_idx >= 0 and row_idx >= 0:
+            occupied_cells.add((col_idx, row_idx))
+    
+    return len(occupied_cells) / total_cells if total_cells > 0 else 0.0
+
+
+def calculate_structure_score(
+    density: float,
+    num_cols: int,
+    num_rows: int,
+    grid_coverage: float,
+    confidence: float
+) -> Tuple[float, List[str]]:
+    """
+    Calculate structural validity score for a table.
+    
+    Args:
+        density: Text density ratio
+        num_cols: Number of detected columns
+        num_rows: Number of detected rows
+        grid_coverage: Grid coverage ratio
+        confidence: Model confidence
+        
+    Returns:
+        Tuple of (score 0-100, list of contributing signals)
+    """
+    score = 0.0
+    signals = []
+    
+    # Signal 1: Multi-column structure (40 points max)
+    if num_cols >= 3:
+        score += 40
+        signals.append(f"columns:{num_cols}")
+    elif num_cols == 2:
+        score += 25
+        signals.append(f"columns:{num_cols}")
+    else:
+        signals.append("single_column")
+    
+    # Signal 2: Row structure (25 points max)
+    if num_rows >= 3:
+        score += 25
+        signals.append(f"rows:{num_rows}")
+    elif num_rows == 2:
+        score += 15
+        signals.append(f"rows:{num_rows}")
+    else:
+        signals.append("few_rows")
+    
+    # Signal 3: Grid coverage (20 points max)
+    if grid_coverage >= 0.3:
+        score += 20
+        signals.append(f"grid_coverage:{grid_coverage:.0%}")
+    elif grid_coverage >= 0.15:
+        score += 10
+        signals.append(f"grid_coverage:{grid_coverage:.0%}")
+    else:
+        signals.append(f"sparse_grid:{grid_coverage:.0%}")
+    
+    # Signal 4: Text density in valid range (10 points)
+    if MIN_TEXT_DENSITY <= density <= MAX_TEXT_DENSITY:
+        score += 10
+        signals.append(f"density_ok:{density:.1%}")
+    else:
+        signals.append(f"density_bad:{density:.1%}")
+    
+    # Signal 5: Model confidence bonus (5 points)
+    if confidence >= 0.95:
+        score += 5
+        signals.append("high_confidence")
+    
+    return score, signals
+
+
+def validate_table_structure(
+    table_element: Dict, 
+    text_elements: List[Dict]
+) -> Tuple[bool, float, List[str]]:
+    """
+    Validate if a detected table has true tabular structure.
+    
+    Args:
+        table_element: Table element dictionary
+        text_elements: All text elements on the page
+        
+    Returns:
+        Tuple of (is_valid, score, signals)
+    """
+    table_bbox = table_element.get("bbox", [])
+    confidence = table_element.get("confidence", 0.5)
+    
+    if len(table_bbox) != 4:
+        return False, 0.0, ["invalid_bbox"]
+    
+    # Get text elements that overlap with this table
+    overlapping_texts = []
+    for text_elem in text_elements:
+        text_bbox = text_elem.get("bbox", [])
+        if text_bbox and bbox_overlap(table_bbox, text_bbox) >= 0.3:
+            overlapping_texts.append(text_bbox)
+    
+    if not overlapping_texts:
+        return False, 0.0, ["no_text_overlap"]
+    
+    # Calculate structural metrics
+    density = calculate_text_density(table_bbox, overlapping_texts)
+    num_cols, col_centers = detect_column_alignment(table_bbox, overlapping_texts)
+    num_rows, row_centers = detect_row_alignment(table_bbox, overlapping_texts)
+    grid_coverage = check_grid_coverage(overlapping_texts, col_centers, row_centers)
+    
+    # Calculate combined score
+    score, signals = calculate_structure_score(
+        density, num_cols, num_rows, grid_coverage, confidence
+    )
+    
+    is_valid = score >= MIN_STRUCTURE_SCORE
+    
+    return is_valid, score, signals
+
+
+def filter_invalid_tables(elements: List[Dict]) -> List[Dict]:
+    """
+    Filter out tables that don't have valid tabular structure.
+    
+    Tables with score < MIN_STRUCTURE_SCORE are removed.
+    Tables with borderline scores are flagged.
+    
+    Args:
+        elements: List of element dictionaries
+        
+    Returns:
+        Filtered list with invalid tables removed
+    """
+    # Separate text elements for analysis
+    text_elements = [e for e in elements if e.get("type") == "text"]
+    
+    filtered = []
+    tables_removed = 0
+    tables_kept = 0
+    
+    for element in elements:
+        if element.get("type") != "table":
+            filtered.append(element)
+            continue
+        
+        # Validate table structure
+        is_valid, score, signals = validate_table_structure(element, text_elements)
+        
+        if is_valid:
+            # Add validation info to table
+            element["structure_score"] = round(score, 1)
+            element["structure_signals"] = signals
+            filtered.append(element)
+            tables_kept += 1
+        else:
+            # Remove invalid table
+            tables_removed += 1
+    
+    return filtered
+
+
 def postprocess_output(output_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Apply all post-processing to OCR output.
     
     Steps:
     0. Filter empty table/layout regions (remove hallucinations)
+    0.5. Validate table structure (remove false positive tables)
     1. Deduplicate layout regions
     2. Score and flag potential hallucinations
     3. Clean text content
@@ -117,6 +449,9 @@ def postprocess_output(output_data: Dict[str, Any]) -> Dict[str, Any]:
         
         # Step 0: Filter empty table/layout regions
         elements = filter_empty_regions(elements)
+        
+        # Step 0.5: Validate table structure (remove false positives)
+        elements = filter_invalid_tables(elements)
         
         # Step 1: Deduplicate layout regions
         elements = deduplicate_layout_regions(elements)
