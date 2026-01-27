@@ -4,6 +4,7 @@ import argparse
 import json
 import time
 from src.processing_pipeline import DocumentProcessor
+from src.postprocessing import postprocess_output
 
 def main():
     parser = argparse.ArgumentParser(description="Document Processing Pipeline")
@@ -39,6 +40,8 @@ def main():
 
         try:
             doc_data = processor.process_document(file_path)
+            # Apply post-processing: deduplication, hallucination detection, text cleaning
+            doc_data = postprocess_output(doc_data)
             with open(output_file_path, "w", encoding="utf-8") as f:
                 json.dump(doc_data, f, indent=2, ensure_ascii=False)
         except Exception as e:
