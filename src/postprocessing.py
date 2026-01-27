@@ -5,7 +5,94 @@ Implements multi-signal hallucination detection and output cleaning.
 """
 
 import re
-from typing import Dict, List, Any, Tuple
+from typing import Dict, List, Any, Tuple, Optional
+
+
+def bbox_overlap(bbox1: List[float], bbox2: List[float]) -> float:
+    """
+    Calculate the overlap ratio between two bounding boxes.
+    
+    Args:
+        bbox1: First bbox [x1, y1, x2, y2]
+        bbox2: Second bbox [x1, y1, x2, y2]
+        
+    Returns:
+        Overlap ratio (0.0 to 1.0) relative to the smaller bbox
+    """
+    if len(bbox1) != 4 or len(bbox2) != 4:
+        return 0.0
+    
+    # Calculate intersection
+    x1 = max(bbox1[0], bbox2[0])
+    y1 = max(bbox1[1], bbox2[1])
+    x2 = min(bbox1[2], bbox2[2])
+    y2 = min(bbox1[3], bbox2[3])
+    
+    if x2 <= x1 or y2 <= y1:
+        return 0.0  # No intersection
+    
+    intersection_area = (x2 - x1) * (y2 - y1)
+    
+    # Calculate areas
+    area1 = (bbox1[2] - bbox1[0]) * (bbox1[3] - bbox1[1])
+    area2 = (bbox2[2] - bbox2[0]) * (bbox2[3] - bbox2[1])
+    
+    if area1 <= 0 or area2 <= 0:
+        return 0.0
+    
+    # Return ratio relative to the smaller bbox (typically the text element)
+    smaller_area = min(area1, area2)
+    return intersection_area / smaller_area
+
+
+def filter_empty_regions(elements: List[Dict]) -> List[Dict]:
+    """
+    Filter out table and layout_region elements that contain no text.
+    
+    A region is kept only if at least one text element's bbox overlaps
+    with it by >= 30%. This removes hallucinated regions in empty/noisy areas.
+    
+    Args:
+        elements: List of element dictionaries
+        
+    Returns:
+        Filtered list with empty regions removed
+    """
+    MIN_OVERLAP_RATIO = 0.3  # 30% overlap required
+    
+    # Separate text elements from regions
+    text_elements = [e for e in elements if e.get("type") == "text"]
+    text_bboxes = [e.get("bbox", []) for e in text_elements]
+    
+    filtered = []
+    removed_count = 0
+    
+    for element in elements:
+        elem_type = element.get("type", "")
+        
+        # Keep text elements and other types (logo, etc.)
+        if elem_type not in ("table", "layout_region"):
+            filtered.append(element)
+            continue
+        
+        # Check if this region overlaps with any text
+        region_bbox = element.get("bbox", [])
+        if not region_bbox:
+            removed_count += 1
+            continue
+        
+        has_text_overlap = False
+        for text_bbox in text_bboxes:
+            if text_bbox and bbox_overlap(region_bbox, text_bbox) >= MIN_OVERLAP_RATIO:
+                has_text_overlap = True
+                break
+        
+        if has_text_overlap:
+            filtered.append(element)
+        else:
+            removed_count += 1
+    
+    return filtered
 
 
 def postprocess_output(output_data: Dict[str, Any]) -> Dict[str, Any]:
@@ -13,9 +100,11 @@ def postprocess_output(output_data: Dict[str, Any]) -> Dict[str, Any]:
     Apply all post-processing to OCR output.
     
     Steps:
+    0. Filter empty table/layout regions (remove hallucinations)
     1. Deduplicate layout regions
     2. Score and flag potential hallucinations
     3. Clean text content
+    4. Normalize phone numbers
     
     Args:
         output_data: Raw OCR output dictionary
@@ -25,6 +114,9 @@ def postprocess_output(output_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     for page in output_data.get("pages", []):
         elements = page.get("elements", [])
+        
+        # Step 0: Filter empty table/layout regions
+        elements = filter_empty_regions(elements)
         
         # Step 1: Deduplicate layout regions
         elements = deduplicate_layout_regions(elements)
