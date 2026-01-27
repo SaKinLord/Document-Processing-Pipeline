@@ -23,6 +23,7 @@ A state-of-the-art local pipeline for extracting structured data from complex, m
     *   Layout region deduplication
     *   Text content cleaning
     *   **Empty region filtering** (removes hallucinated tables/regions)
+    *   **Structural validation filter** (removes false positive tables)
     *   **Phone number normalization** (extracts & standardizes phone numbers)
 *   **Robust Pre-processing:** Adaptive denoising using OpenCV to clean scanned artifacts.
 
@@ -90,7 +91,7 @@ The pipeline follows a sequential flow with intelligent branching:
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    POST-PROCESSING                               │
-│  Empty Region Filter │ Hallucination │ Dedup │ Phone Normalize   │
+│  Empty Filter │ Table Validation │ Hallucination │ Phone Norm    │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -120,6 +121,26 @@ Text elements are scored for hallucination likelihood using 6 signals:
 ### Empty Region Filtering
 
 Removes hallucinated table and layout regions that don't overlap with actual text content. This prevents false table detections in empty areas of documents.
+
+### Structural Validation Filter
+
+Validates that detected tables have true tabular structure (not just forms or aligned lists). Uses multiple signals:
+
+| Signal | Max Points | Description |
+|--------|------------|-------------|
+| Columns | 40 | 3+ columns = 40 pts, 2 columns = 25 pts |
+| Rows | 25 | 3+ rows = 25 pts, 2 rows = 15 pts |
+| Grid Coverage | 20 | How well text fills the column×row grid |
+| Text Density | 10 | Ratio of text area to table area (3-80%) |
+| Confidence | 5 | Model confidence ≥ 95% |
+
+**Decision Logic:**
+- Score ≥ 50 → **Keep** (valid table structure)
+- Score < 50 → **Remove** (likely form or false positive)
+
+**Output Fields Added:**
+- `structure_score`: 0-100 validation score
+- `structure_signals`: Array of detected structural features
 
 ### Phone Number Normalization
 
@@ -199,7 +220,10 @@ For each file `input/doc.png`, an `output/doc.json` is generated:
         },
         {
           "type": "table",
-          "bbox": [...]
+          "bbox": [...],
+          "confidence": 0.97,
+          "structure_score": 100.0,
+          "structure_signals": ["columns:5", "rows:12", "grid_coverage:53%"]
         }
       ]
     }
