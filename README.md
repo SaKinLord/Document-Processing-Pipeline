@@ -22,6 +22,8 @@ A state-of-the-art local pipeline for extracting structured data from complex, m
     *   Hallucination detection using 6 weighted signals
     *   Layout region deduplication
     *   Text content cleaning
+    *   **Empty region filtering** (removes hallucinated tables/regions)
+    *   **Phone number normalization** (extracts & standardizes phone numbers)
 *   **Robust Pre-processing:** Adaptive denoising using OpenCV to clean scanned artifacts.
 
 ## 📊 Accuracy & Performance
@@ -88,7 +90,7 @@ The pipeline follows a sequential flow with intelligent branching:
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    POST-PROCESSING                               │
-│  Hallucination Detection │ Deduplication │ Text Cleaning         │
+│  Empty Region Filter │ Hallucination │ Dedup │ Phone Normalize   │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼
@@ -114,6 +116,27 @@ Text elements are scored for hallucination likelihood using 6 signals:
 - Score > 0.70 → **Remove** (likely hallucination)
 - Score 0.40-0.70 → **Flag** (keep but mark uncertain)
 - Score ≤ 0.40 → **Keep** (likely valid)
+
+### Empty Region Filtering
+
+Removes hallucinated table and layout regions that don't overlap with actual text content. This prevents false table detections in empty areas of documents.
+
+### Phone Number Normalization
+
+Extracts and normalizes phone numbers from text elements:
+
+| Input Format | Normalized Output |
+|--------------|-------------------|
+| `614-466-5087` | `(614) 466-5087` |
+| `212/545-3297` | `(212) 545-3297` |
+| `Fax:614-466-5087` | `(614) 466-5087` |
+| `206 623 0594` | `(206) 623-0594` |
+
+**Adds to JSON:**
+- `normalized_phone` or `normalized_phones` (for multiple)
+- `phone_type`: `"fax"`, `"phone"`, or empty
+
+**False Positive Protection:** ZIP codes (e.g., `64105-2118`) and dates are NOT normalized.
 
 ## ⚙️ Setup
 
@@ -161,11 +184,13 @@ For each file `input/doc.png`, an `output/doc.json` is generated:
       "elements": [
         {
           "type": "text",
-          "content": "Example Line",
+          "content": "FAX NO. (614) 466-5087",
           "bbox": [100, 200, 500, 250],
           "confidence": 0.98,
           "source_model": "surya",
-          "row_id": 5
+          "row_id": 5,
+          "normalized_phone": "(614) 466-5087",
+          "phone_type": "fax"
         },
         {
           "type": "layout_region",
