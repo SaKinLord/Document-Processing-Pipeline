@@ -24,6 +24,7 @@ A state-of-the-art local pipeline for extracting structured data from complex, m
     *   Text content cleaning
     *   **Empty region filtering** (removes hallucinated tables/regions)
     *   **Structural validation filter** (removes false positive tables)
+    *   **Heuristic table promotion** (detects borderless tables missed by the model)
     *   **Phone number normalization** (extracts & standardizes phone numbers)
 *   **Robust Pre-processing:** Adaptive denoising using OpenCV to clean scanned artifacts.
 
@@ -158,6 +159,35 @@ Extracts and normalizes phone numbers from text elements:
 - `phone_type`: `"fax"`, `"phone"`, or empty
 
 **False Positive Protection:** ZIP codes (e.g., `64105-2118`) and dates are NOT normalized.
+
+### Heuristic Table Promotion
+
+Detects borderless tables that the Table Transformer model misses by analyzing clusters of `layout_region` elements for tabular structure.
+
+**How it works:**
+1. Clusters vertically adjacent layout regions (max gap: 20px)
+2. Validates cluster structure using column/row alignment
+3. Promotes valid clusters to synthetic `table` elements
+
+**Validation Criteria (must meet ALL):**
+
+| Criterion | Threshold | Description |
+|-----------|-----------|-------------|
+| Regions | ≥15 | Minimum layout regions in cluster |
+| Columns | ≥4 | Detected column alignment |
+| Rows | ≥5 | Detected row alignment |
+| Structure Score | ≥90 | Combined structural validation |
+| Grid Coverage | ≥55% | Text elements filling the grid |
+
+**Boundary Refinement:**
+
+Trimms non-tabular header rows from the top using the "Vertical Continuity Rule":
+- A row qualifies as anchor if it has **≥6 items** (high density)
+- OR if it has **≥4 columns spanning ≥60% width** AND the next row also qualifies
+
+**Output Fields Added:**
+- `source: "heuristic_promotion"` - Indicates table was promoted (not model-detected)
+- `confidence: 0.8` - Lower confidence than model-detected tables
 
 ## ⚙️ Setup
 
