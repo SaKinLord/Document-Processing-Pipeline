@@ -14,7 +14,10 @@ A state-of-the-art local pipeline for extracting structured data from complex, m
 *   **Three-Way Routing:** Documents classified as `typed`, `handwritten`, or `mixed` (ensemble OCR)
 *   **Multi-Model Intelligence:**
     *   **Surya OCR (SegFormer):** High-precision text detection and recognition for typed documents.
-    *   **TrOCR (Transformer OCR):** Specialized attention-based recognition for handwritten lines.
+    *   **TrOCR (Transformer OCR):** Specialized attention-based recognition for handwritten lines with:
+        *   Beam search decoding (num_beams=4) for improved accuracy
+        *   12px bounding box padding to preserve descenders (g, y, p, q)
+        *   Punctuation spacing normalization
     *   **Table Transformer (DETR):** Accurately detects tables and extracts structural bounding boxes.
     *   **LayoutLMv3:** Understands document layout (Headers, Titles, Figures) for semantic segmentation.
     *   **Florence-2 (VLM):** Vision-Language Model for captioning figures and detecting logos/signatures.
@@ -26,25 +29,27 @@ A state-of-the-art local pipeline for extracting structured data from complex, m
     *   **Structural validation filter** (removes false positive tables)
     *   **Heuristic table promotion** (detects borderless tables missed by the model)
     *   **Phone number normalization** (extracts & standardizes phone numbers)
+    *   **Punctuation spacing normalization** (fixes TrOCR's extra spaces around punctuation)
 *   **Robust Pre-processing:** Adaptive denoising using OpenCV to clean scanned artifacts.
 
 ## 📊 Accuracy & Performance
 
-Based on testing with 15 diverse documents (Jan 2026):
+Based on testing with 15 diverse documents (Feb 2026):
 
 | Document Type | Count | Accuracy | Best For |
 | :--- | :--- | :--- | :--- |
 | **Typed / Structured** | 8 | **95-99%** | Forms, Invoices, Technical Specs, Faxes |
-| **Handwritten** | 2 | **80-90%** | Letters, Notes, Cursive Annotations |
-| **Mixed** | 5 | **90-95%** | Forms with handwritten fill-ins |
+| **Handwritten** | 5 | **92-98%** | Letters, Notes, Cursive Annotations |
+| **Mixed** | 2 | **90-95%** | Forms with handwritten fill-ins |
 
 ### Performance Metrics
 
 | Metric | Value |
 |--------|-------|
-| Processing Time (15 docs) | ~230 seconds |
+| Processing Time (15 docs) | ~500 seconds |
 | Avg JSON file size | ~20KB |
 | Classification Accuracy | 100% (0 misclassifications) |
+| Handwritten CER | ~2-4% |
 
 ## 🛠️ Architecture
 
@@ -73,13 +78,13 @@ The pipeline follows a sequential flow with intelligent branching:
             ▼                 ▼                 ▼
       ┌──────────┐      ┌──────────┐      ┌──────────┐
       │  TYPED   │      │  MIXED   │      │HANDWRITTEN│
-      │ (≥0.70)  │      │(0.30-0.70)│     │ (≤0.30)  │
+      │ (≥0.70)  │      │(0.53-0.70)│     │ (≤0.53)  │
       └────┬─────┘      └────┬─────┘      └────┬─────┘
            │                 │                  │
            ▼                 ▼                  ▼
       ┌─────────┐      ┌───────────┐      ┌─────────┐
       │  Surya  │      │ Ensemble  │      │  TrOCR  │
-      │   OCR   │      │Surya+TrOCR│      │   OCR   │
+      │   OCR   │      │Surya+TrOCR│      │ +padding│
       └────┬────┘      └─────┬─────┘      └────┬────┘
            │                 │                  │
            └─────────────────┼──────────────────┘
@@ -92,7 +97,7 @@ The pipeline follows a sequential flow with intelligent branching:
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                    POST-PROCESSING                               │
-│  Empty Filter │ Table Validation │ Hallucination │ Phone Norm    │
+│  Empty Filter │ Table Validation │ Hallucination │ Punctuation   │
 └─────────────────────────────────────────────────────────────────┘
                               │
                               ▼

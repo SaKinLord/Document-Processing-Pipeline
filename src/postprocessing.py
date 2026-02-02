@@ -8,6 +8,52 @@ import re
 from typing import Dict, List, Any, Tuple, Optional
 
 
+def normalize_punctuation_spacing(text: str) -> str:
+    """
+    Normalize spacing around punctuation in OCR output.
+    
+    TrOCR tends to add unnecessary spaces around punctuation marks which
+    inflates WER (Word Error Rate) scores. This function fixes common patterns:
+    - 'Govr. ,' -> 'Govr.,'
+    - 'word . word' -> 'word. word'
+    - '( text )' -> '(text)'
+    - 'word ; word' -> 'word; word'
+    
+    Args:
+        text: Raw OCR text output
+        
+    Returns:
+        Text with normalized punctuation spacing
+    """
+    if not text:
+        return text
+    
+    # Remove space before punctuation: 'word .' -> 'word.'
+    text = re.sub(r'\s+([.,;:!?])', r'\1', text)
+    
+    # Remove space after opening brackets: '( text' -> '(text'
+    text = re.sub(r'([\(\[\{])\s+', r'\1', text)
+    
+    # Remove space before closing brackets: 'text )' -> 'text)'
+    text = re.sub(r'\s+([\)\]\}])', r'\1', text)
+    
+    # Fix double punctuation with space: '. ,' -> '.,'
+    text = re.sub(r'([.,;:!?])\s+([.,;:!?])', r'\1\2', text)
+    
+    # Fix space around hyphens in words: 'self - aware' -> 'self-aware'
+    text = re.sub(r'(\w)\s+-\s+(\w)', r'\1-\2', text)
+    
+    # Fix space around apostrophes: "don 't" -> "don't"
+    text = re.sub(r"(\w)\s+'\s*(\w)", r"\1'\2", text)
+    text = re.sub(r"(\w)\s+'", r"\1'", text)
+    text = re.sub(r"'\s+(\w)", r"'\1", text)
+    
+    # Collapse multiple spaces into single space
+    text = re.sub(r' {2,}', ' ', text)
+    
+    return text.strip()
+
+
 def bbox_overlap(bbox1: List[float], bbox2: List[float]) -> float:
     """
     Calculate the overlap ratio between two bounding boxes.

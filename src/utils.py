@@ -39,6 +39,31 @@ def crop_image(image, bbox):
     return image.crop(bbox)
 
 
+def pad_bbox(bbox, padding, image_width, image_height):
+    """
+    Pad a bounding box by a given number of pixels, ensuring it stays within image bounds.
+    
+    This is particularly important for handwritten text where Surya's tight cropping
+    may cut off descenders (g, y, p, q) which TrOCR needs to see for accurate recognition.
+    
+    Args:
+        bbox: Bounding box [x1, y1, x2, y2]
+        padding: Number of pixels to add on each side
+        image_width: Width of the source image
+        image_height: Height of the source image
+        
+    Returns:
+        Padded bounding box [x1, y1, x2, y2] clamped to image bounds
+    """
+    x1, y1, x2, y2 = bbox
+    return [
+        max(0, x1 - padding),
+        max(0, y1 - padding),
+        min(image_width, x2 + padding),
+        min(image_height, y2 + padding)
+    ]
+
+
 def estimate_noise(image_np):
     """
     Estimates noise level using a simple median blur difference method.
@@ -370,10 +395,11 @@ def classify_document_type(image):
             typed_score += 0.08
         
         # Determine classification with confidence
-        # Threshold: typed >= 0.70, handwritten <= 0.30, else mixed
+        # Threshold: typed >= 0.70, handwritten <= 0.53, else mixed
+        # Changed to 0.53 to capture r02-070 (typed_score=0.52) as handwritten
         if typed_score >= 0.70:
             return ("typed", min(typed_score, 0.95))
-        elif typed_score <= 0.30:
+        elif typed_score <= 0.53:
             return ("handwritten", min(1.0 - typed_score, 0.95))
         else:
             # Uncertain - classify as mixed (will use ensemble OCR)

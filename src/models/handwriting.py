@@ -8,6 +8,13 @@ class HandwritingRecognizer:
         print(f"Loading TrOCR model on {self.device}...")
         self.processor = TrOCRProcessor.from_pretrained('microsoft/trocr-large-handwritten')
         self.model = VisionEncoderDecoderModel.from_pretrained('microsoft/trocr-large-handwritten').to(self.device)
+        
+        # CRITICAL FIX: Disable the pooler to prevent randomly initialized weights from affecting inference
+        # The pooler is not used by the decoder (which uses last_hidden_state for cross-attention)
+        # but it IS computed during forward pass, potentially corrupting the hidden states
+        if hasattr(self.model.encoder, 'pooler'):
+            self.model.encoder.pooler = None
+            print("  Pooler layer disabled to prevent uninitialized weight interference")
 
     def recognize(self, image_crop):
         """
@@ -28,7 +35,13 @@ class HandwritingRecognizer:
             pixel_values = self.processor(images=image_crop, return_tensors="pt").pixel_values.to(self.device)
             
             with torch.no_grad():
-                generated_ids = self.model.generate(pixel_values, max_length=128)
+                # Optimized generation with beam search for better quality
+                generated_ids = self.model.generate(
+                    pixel_values,
+                    max_length=128,
+                    num_beams=4,                 # Beam search for better quality
+                    early_stopping=True,         # Stop at first complete sequence
+                )
             
             generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
             return generated_text

@@ -7,10 +7,11 @@ from surya.detection import DetectionPredictor
 
 from surya.recognition import RecognitionPredictor, FoundationPredictor
 from langdetect import detect, LangDetectException
-from src.utils import load_image, convert_pdf_to_images, crop_image, denoise_image, cluster_text_rows, is_bbox_too_large, SpellCorrector, classify_document_type
+from src.utils import load_image, convert_pdf_to_images, crop_image, pad_bbox, denoise_image, cluster_text_rows, is_bbox_too_large, SpellCorrector, classify_document_type
 from src.models.handwriting import HandwritingRecognizer
 from src.models.table import TableRecognizer
 from src.models.layout import LayoutAnalyzer
+from src.postprocessing import normalize_punctuation_spacing
 
 class DocumentProcessor:
     def __init__(self, device='cuda' if torch.cuda.is_available() else 'cpu'):
@@ -155,9 +156,9 @@ class DocumentProcessor:
             run_handwriting_model = False
             use_ensemble = False
             
-            if doc_type == "handwritten" and doc_confidence >= 0.6:
+            if doc_type == "handwritten" and doc_confidence >= 0.45:
                 run_handwriting_model = True
-            elif doc_type == "mixed" or doc_confidence < 0.6:
+            elif doc_type == "mixed" or doc_confidence < 0.45:
                 # Uncertain classification - use ensemble approach
                 use_ensemble = True
             elif doc_type == "typed" and line.confidence < 0.6:
@@ -167,7 +168,9 @@ class DocumentProcessor:
             
             if use_ensemble:
                 # Run both OCR engines, pick the one with higher confidence
-                line_crop = crop_image(image, line.bbox)
+                # Add padding to bbox to prevent cutting off descenders (g, y, p, q)
+                padded_bbox = pad_bbox(line.bbox, 12, width, height)
+                line_crop = crop_image(image, padded_bbox)
                 hw_text = self.handwriting_recognizer.recognize(line_crop)
                 
                 # Compare: prefer Surya if confidence is high, else use TrOCR
@@ -175,17 +178,20 @@ class DocumentProcessor:
                     final_text = line.text
                     source_model = "surya"
                 elif hw_text and len(hw_text.strip()) > 0:
-                    final_text = hw_text
+                    # Normalize punctuation spacing in TrOCR output
+                    final_text = normalize_punctuation_spacing(hw_text)
                     source_model = "trocr"
                 # else keep surya result
                     
             elif run_handwriting_model:
-               # Crop the line area
-               line_crop = crop_image(image, line.bbox)
+               # Crop the line area with padding to prevent cutting off descenders
+               padded_bbox = pad_bbox(line.bbox, 12, width, height)
+               line_crop = crop_image(image, padded_bbox)
                # Use TrOCR
                hw_text = self.handwriting_recognizer.recognize(line_crop)
                if hw_text and len(hw_text.strip()) > 0:
-                   final_text = hw_text
+                   # Normalize punctuation spacing in TrOCR output
+                   final_text = normalize_punctuation_spacing(hw_text)
                    source_model = "trocr"
 
             # Apply Spell Correction (Re-enabled with safer whitelist approach)
