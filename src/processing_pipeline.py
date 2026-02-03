@@ -11,7 +11,7 @@ from src.utils import load_image, convert_pdf_to_images, crop_image, pad_bbox, d
 from src.models.handwriting import HandwritingRecognizer
 from src.models.table import TableRecognizer
 from src.models.layout import LayoutAnalyzer
-from src.postprocessing import normalize_punctuation_spacing
+from src.postprocessing import normalize_punctuation_spacing, add_phone_validation_to_element, add_date_validation_to_element
 
 class DocumentProcessor:
     def __init__(self, device='cuda' if torch.cuda.is_available() else 'cpu'):
@@ -198,13 +198,19 @@ class DocumentProcessor:
             corrected_text = self.spell_corrector.correct_text(final_text)
             # corrected_text = final_text
             
-            text_elements.append({
+            text_element = {
                 "type": "text",
                 "content": corrected_text,
                 "bbox": line.bbox, 
                 "confidence": line.confidence,
                 "source_model": source_model
-            })
+            }
+            
+            # Add phone and date validation (flags only, no auto-correct)
+            text_element = add_phone_validation_to_element(text_element)
+            text_element = add_date_validation_to_element(text_element)
+            
+            text_elements.append(text_element)
             all_text_content.append(corrected_text)
             
             # Collect for Layout Analysis

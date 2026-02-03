@@ -7,3 +7,20 @@ log.txt
 .vscode/
 ground_truth.json
 validate_accuracy.py
+
+# Analysis artifacts (generated, not needed in repo)
+ground_truth_revised.json
+ocr_accuracy_analysis.md
+ocr_accuracy_summary.csv
+ocr_error_examples.md
+
+# Input files (user-specific test documents)
+input/
+
+# Test files
+tests/
+
+# Environment
+.env
+venv/
+*.egg-info/

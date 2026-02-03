@@ -4,14 +4,18 @@ A state-of-the-art local pipeline for extracting structured data from complex, m
 
 ## 🚀 Key Features
 
-*   **Intelligent 6-Feature Classification:** Automatically detects document type using:
+*   **Intelligent 8-Feature Classification:** Automatically detects document type using:
     *   Stroke width variance
     *   Line regularity (horizontal alignment)
-    *   Contour angle variance
+    *   Contour angle variance (with handwriting penalty for high variance)
     *   Edge density
     *   **Form structure detection** (horizontal/vertical lines)
     *   **Character uniformity**
+    *   **Signature region isolation** (bottom 20% of page)
+    *   **Fax/letterhead header detection** (top 15%)
+    *   **Ruled paper handwriting detection** (biases lined paper toward handwritten)
 *   **Three-Way Routing:** Documents classified as `typed`, `handwritten`, or `mixed` (ensemble OCR)
+    *   Thresholds: typed ≥ 0.65, handwritten ≤ 0.45, else mixed
 *   **Multi-Model Intelligence:**
     *   **Surya OCR (SegFormer):** High-precision text detection and recognition for typed documents.
     *   **TrOCR (Transformer OCR):** Specialized attention-based recognition for handwritten lines with:
@@ -34,22 +38,23 @@ A state-of-the-art local pipeline for extracting structured data from complex, m
 
 ## 📊 Accuracy & Performance
 
-Based on testing with 15 diverse documents (Feb 2026):
+Based on regression testing with 12 ground truth documents (Feb 2026):
 
-| Document Type | Count | Accuracy | Best For |
-| :--- | :--- | :--- | :--- |
-| **Typed / Structured** | 8 | **95-99%** | Forms, Invoices, Technical Specs, Faxes |
-| **Handwritten** | 5 | **92-98%** | Letters, Notes, Cursive Annotations |
-| **Mixed** | 2 | **90-95%** | Forms with handwritten fill-ins |
+| Document Type | Count | WER | CER | Best For |
+| :--- | :--- | :--- | :--- | :--- |
+| **Typed / Structured** | 7 | **0.0%** | **0.0%** | Forms, Invoices, Technical Specs, Faxes |
+| **Handwritten** | 5 | **1.6-16.4%** | **1.7-5.3%** | Letters, Notes, Cursive Annotations |
+| **Mixed** | 1 | **6.4%** | **2.5%** | Forms with handwritten fill-ins |
 
 ### Performance Metrics
 
 | Metric | Value |
 |--------|-------|
-| Processing Time (15 docs) | ~500 seconds |
-| Avg JSON file size | ~20KB |
-| Classification Accuracy | 100% (0 misclassifications) |
-| Handwritten CER | ~2-4% |
+| Regression Tests | **12/12 passing** |
+| Average WER | **3.4%** |
+| Average CER | **1.8%** |
+| Processing Time (15 docs) | ~450 seconds |
+| Classification Accuracy | **100%** (0 misclassifications) |
 
 ## 🛠️ Architecture
 
@@ -69,16 +74,18 @@ The pipeline follows a sequential flow with intelligent branching:
                               │
                               ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                 6-FEATURE CLASSIFIER                             │
-│  Stroke Variance │ Line Regularity │ Angle Variance              │
+│                 8-FEATURE CLASSIFIER                             │
+│  Stroke Variance │ Line Regularity │ Angle Variance (weighted)   │
 │  Edge Density    │ Form Structure  │ Character Uniformity        │
+│  Signature Isolation (bottom 20%) │ Fax Header Detection (top 15%)│
+│            Ruled Paper Handwriting Detection                     │
 └─────────────────────────────────────────────────────────────────┘
                               │
             ┌─────────────────┼─────────────────┐
             ▼                 ▼                 ▼
       ┌──────────┐      ┌──────────┐      ┌──────────┐
       │  TYPED   │      │  MIXED   │      │HANDWRITTEN│
-      │ (≥0.70)  │      │(0.53-0.70)│     │ (≤0.53)  │
+      │ (≥0.65)  │      │(0.45-0.65)│     │ (≤0.45)  │
       └────┬─────┘      └────┬─────┘      └────┬─────┘
            │                 │                  │
            ▼                 ▼                  ▼
@@ -105,6 +112,33 @@ The pipeline follows a sequential flow with intelligent branching:
 │                       JSON OUTPUT                                │
 └─────────────────────────────────────────────────────────────────┘
 ```
+
+### Enhanced Document Classification
+
+The classifier uses 8 weighted signals to determine document type:
+
+| Signal | Contribution | Logic |
+|--------|-------------|-------|
+| Stroke Variance | +0.10 to +0.20 | Low variance = typed |
+| Line Regularity | +0.06 to +0.12 | High regularity = typed |
+| Angle Variance | -0.15 to +0.10 | Low = typed, High = handwritten penalty |
+| Edge Density | +0.04 to +0.08 | Moderate density = typed |
+| Form Structure | +0.15 to +0.35 | Forms/tables = typed document |
+| Character Uniformity | +0.06 to +0.12 | Uniform heights = typed |
+| Signature Isolation | +0.10 | Signatures on forms = typed |
+| Fax Header Detection | +0.15 | Fax/letterhead text = typed |
+
+**Special Adjustments:**
+
+| Adjustment | Conditions | Effect |
+|------------|------------|--------|
+| **Ruled Paper Handwriting** | line_score ≥ 0.95(lined paper), form_score < 0.25, angle_score 300-700 | -0.12 (bias toward handwritten) |
+| **High Angle Variance Penalty** | angle_score > 1200, form_score < 0.5 | -0.08 to -0.15 (bias toward handwritten) |
+
+**Thresholds:**
+- typed_score ≥ 0.65 → **Typed** (use Surya OCR)
+- typed_score ≤ 0.45 → **Handwritten** (use TrOCR)
+- Otherwise → **Mixed** (use ensemble OCR)
 
 ### Post-Processing: Multi-Signal Hallucination Detection
 

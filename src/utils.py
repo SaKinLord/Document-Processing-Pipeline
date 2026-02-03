@@ -320,7 +320,11 @@ def classify_document_type(image):
     1. Stroke width variance (typed = uniform, handwritten = variable)
     2. Line regularity (typed = horizontal, handwritten = slanted)
     3. Edge density patterns
-    4. Contour angle variance (original feature)
+    4. Contour angle variance
+    5. Form structure detection (lines, boxes)
+    6. Character uniformity
+    7. Signature isolation (exclude bottom signature region from analysis)
+    8. Fax/letterhead header detection
     """
     try:
         # Convert to grayscale
@@ -332,27 +336,44 @@ def classify_document_type(image):
         
         # Resize for consistent analysis
         h, w = gray.shape
+        orig_h = h
         if w > 1000:
             scale = 1000 / w
             gray = cv2.resize(gray, (0, 0), fx=scale, fy=scale)
+            h, w = gray.shape
+        
+        # NEW: Isolate signature region (bottom 20% of page) and analyze main body separately
+        signature_region_start = int(h * 0.80)
+        main_body = gray[:signature_region_start, :]
+        signature_region = gray[signature_region_start:, :]
+        
+        # Check if signature region has handwriting characteristics
+        has_signature = _detect_signature_in_region(signature_region)
+        
+        # NEW: Detect fax/letterhead header patterns in top 15% of page
+        header_region = gray[:int(h * 0.15), :]
+        has_fax_header = _detect_fax_header(header_region)
+        
+        # Use main body (excluding signature) for feature extraction
+        analysis_region = main_body if has_signature else gray
         
         # Feature 1: Stroke Width Variance
-        stroke_score = _calculate_stroke_variance(gray)
+        stroke_score = _calculate_stroke_variance(analysis_region)
         
         # Feature 2: Line Regularity (horizontal alignment)
-        line_score = _calculate_line_regularity(gray)
+        line_score = _calculate_line_regularity(analysis_region)
         
         # Feature 3: Contour Angle Variance
-        angle_score = _calculate_angle_variance(gray)
+        angle_score = _calculate_angle_variance(analysis_region)
         
         # Feature 4: Edge density ratio
-        edge_score = _calculate_edge_density(gray)
+        edge_score = _calculate_edge_density(analysis_region)
         
-        # NEW Feature 5: Form structure detection (lines, boxes)
-        form_score = _detect_form_structure(gray)
+        # Feature 5: Form structure detection (lines, boxes)
+        form_score = _detect_form_structure(gray)  # Use full page for form detection
         
-        # NEW Feature 6: Character uniformity
-        uniformity_score = _calculate_character_uniformity(gray)
+        # Feature 6: Character uniformity
+        uniformity_score = _calculate_character_uniformity(analysis_region)
         
         # Weighted voting for "typed"
         # Higher score = more likely typed
@@ -360,46 +381,89 @@ def classify_document_type(image):
         
         # Stroke variance: low = typed
         if stroke_score < 0.3:
-            typed_score += 0.25
-        elif stroke_score < 0.5:
-            typed_score += 0.12
-        
-        # Line regularity: high = typed (reduced weight)
-        if line_score > 0.7:
-            typed_score += 0.15
-        elif line_score > 0.5:
-            typed_score += 0.08
-        
-        # Angle variance: low = typed
-        if angle_score < 800:
             typed_score += 0.20
-        elif angle_score < 1200:
-            typed_score += 0.08
+        elif stroke_score < 0.5:
+            typed_score += 0.10
+        
+        # Line regularity: high = typed
+        if line_score > 0.7:
+            typed_score += 0.12
+        elif line_score > 0.5:
+            typed_score += 0.06
+        
+        # Angle variance: low = typed, HIGH = handwritten (ENHANCED WEIGHTING)
+        # High angle variance is a strong indicator of handwriting
+        # BUT only penalize if not a clear form document (form_score < 0.5)
+        if angle_score < 400:
+            typed_score += 0.10  # Very uniform angles (likely typed)
+        elif angle_score < 800:
+            typed_score += 0.05  # Somewhat uniform (reduced from 0.15)
+        elif angle_score > 1500 and form_score < 0.5:
+            typed_score -= 0.15  # High variance + not a form = strongly handwritten
+        elif angle_score > 1200 and form_score < 0.5:
+            typed_score -= 0.08  # Moderate-high variance + not a form = likely handwritten
         
         # Edge density: moderate = typed
         if 0.02 < edge_score < 0.15:
-            typed_score += 0.10
-        elif edge_score < 0.02:
-            typed_score += 0.05
-        
-        # NEW: Form structure - strong indicator of typed/form document
-        if form_score > 0.5:
-            typed_score += 0.25  # Strong form structure
-        elif form_score > 0.2:
-            typed_score += 0.15  # Some form elements
-        
-        # NEW: Character uniformity - typed has uniform heights
-        if uniformity_score > 0.7:
-            typed_score += 0.15
-        elif uniformity_score > 0.4:
             typed_score += 0.08
+        elif edge_score < 0.02:
+            typed_score += 0.04
+        
+        # BOOSTED: Form structure - strong indicator of typed/form document
+        if form_score > 0.5:
+            typed_score += 0.35  # Strong form structure (boosted from 0.25)
+        elif form_score > 0.2:
+            typed_score += 0.25  # Some form elements (boosted from 0.15)
+        elif form_score > 0.1:
+            typed_score += 0.15  # Minimal form elements
+        
+        # Character uniformity - typed has uniform heights
+        if uniformity_score > 0.7:
+            typed_score += 0.12
+        elif uniformity_score > 0.4:
+            typed_score += 0.06
+        
+        # NEW: Fax/letterhead header boost - strong indicator of typed document
+        if has_fax_header:
+            typed_score += 0.20
+        
+        # NEW: If document has isolated signature but strong form structure, boost typed
+        if has_signature and form_score > 0.2:
+            typed_score += 0.10  # Signature on a form = typed document with signature
+        
+        # TARGETED: Ruled paper handwriting detection
+        # Conditions: high line_score (ruled paper), low form_score (not a form),
+        # moderate angle_score (uniform but not machine-perfect)
+        # This catches handwritten docs on lined paper with consistent slant
+        is_ruled_paper_handwriting = (
+            line_score >= 0.95 and  # Very high line regularity (ruled paper)
+            form_score < 0.25 and   # Not a structured form
+            300 < angle_score < 700  # Uniform handwriting slant (not typed-perfect <300)
+        )
+        if is_ruled_paper_handwriting:
+            typed_score -= 0.12  # Bias toward handwritten
+            print(f"    [DEBUG] Ruled paper handwriting detected: -0.12 adjustment")
+        
+        # DEBUG LOGGING: Output all scoring variables
+        print(f"    [DEBUG] Classification Scores:")
+        print(f"      - stroke_score: {stroke_score:.3f} (low=typed)")
+        print(f"      - line_score: {line_score:.3f} (high=typed)")
+        print(f"      - angle_score: {angle_score:.1f} (low=typed)")
+        print(f"      - edge_score: {edge_score:.4f}")
+        print(f"      - form_score: {form_score:.3f} (high=typed/form)")
+        print(f"      - uniformity_score: {uniformity_score:.3f} (high=typed)")
+        print(f"    [DEBUG] Detection Flags:")
+        print(f"      - has_signature: {has_signature}")
+        print(f"      - has_fax_header: {has_fax_header}")
+        print(f"    [DEBUG] Final typed_score: {typed_score:.3f}")
+        print(f"      - Thresholds: typed>=0.65, handwritten<=0.45, else mixed")
         
         # Determine classification with confidence
-        # Threshold: typed >= 0.70, handwritten <= 0.53, else mixed
-        # Changed to 0.53 to capture r02-070 (typed_score=0.52) as handwritten
-        if typed_score >= 0.70:
+        # Threshold: typed >= 0.65, handwritten <= 0.45, else mixed
+        # Adjusted thresholds for better separation with signature isolation
+        if typed_score >= 0.65:
             return ("typed", min(typed_score, 0.95))
-        elif typed_score <= 0.53:
+        elif typed_score <= 0.45:
             return ("handwritten", min(1.0 - typed_score, 0.95))
         else:
             # Uncertain - classify as mixed (will use ensemble OCR)
@@ -408,6 +472,87 @@ def classify_document_type(image):
     except Exception as e:
         print(f"Warning: Document classification failed, defaulting to mixed. Error: {e}")
         return ("mixed", 0.3)
+
+
+def _detect_signature_in_region(region):
+    """
+    Detect if a region (typically bottom 20% of page) contains a handwritten signature.
+    Signatures have distinctive characteristics: curved strokes, varying thickness, isolated ink.
+    Returns: bool
+    """
+    try:
+        if region.shape[0] < 20 or region.shape[1] < 50:
+            return False
+            
+        # Binarize
+        _, binary = cv2.threshold(region, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        
+        # Count ink pixels in signature region
+        ink_pixels = np.count_nonzero(binary)
+        total_pixels = region.shape[0] * region.shape[1]
+        ink_ratio = ink_pixels / total_pixels if total_pixels > 0 else 0
+        
+        # Signature typically has 0.5-5% ink coverage
+        if ink_ratio < 0.003 or ink_ratio > 0.15:
+            return False
+        
+        # Find connected components
+        num_labels, labels, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
+        
+        if num_labels < 2:  # Only background
+            return False
+        
+        # Look for signature-like components (not too many, moderate size)
+        sig_components = 0
+        for i in range(1, num_labels):
+            area = stats[i, cv2.CC_STAT_AREA]
+            width = stats[i, cv2.CC_STAT_WIDTH]
+            height = stats[i, cv2.CC_STAT_HEIGHT]
+            
+            # Signature strokes: moderate area, wider than tall typically
+            if 50 < area < total_pixels * 0.3 and width > 20:
+                sig_components += 1
+        
+        # Signature typically has 1-10 main components
+        return 1 <= sig_components <= 15
+        
+    except Exception:
+        return False
+
+
+def _detect_fax_header(header_region):
+    """
+    Detect fax/letterhead header patterns.
+    Fax headers have: horizontal lines, dense text in header, specific patterns.
+    Returns: bool
+    """
+    try:
+        if header_region.shape[0] < 30 or header_region.shape[1] < 100:
+            return False
+        
+        # Binarize
+        _, binary = cv2.threshold(header_region, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+        
+        # Check for horizontal lines (fax separator lines)
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (50, 1))
+        horizontal_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horizontal_kernel)
+        h_line_pixels = np.count_nonzero(horizontal_lines)
+        
+        # Check ink density in header
+        ink_pixels = np.count_nonzero(binary)
+        total_pixels = header_region.shape[0] * header_region.shape[1]
+        ink_ratio = ink_pixels / total_pixels if total_pixels > 0 else 0
+        
+        # Fax headers typically have:
+        # - Horizontal separator lines (h_line_pixels > 0)
+        # - Moderate to high text density (3-20%)
+        has_lines = h_line_pixels > (header_region.shape[1] * 0.1)  # At least 10% width line
+        has_dense_text = 0.02 < ink_ratio < 0.25
+        
+        return has_lines and has_dense_text
+        
+    except Exception:
+        return False
 
 
 def _calculate_stroke_variance(gray):

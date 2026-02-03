@@ -54,6 +54,387 @@ def normalize_punctuation_spacing(text: str) -> str:
     return text.strip()
 
 
+# ============================================================================
+# Document Type Indicators (Text-based classification helpers)
+# ============================================================================
+
+# Patterns that strongly indicate a typed/fax document
+FAX_HEADER_PATTERNS = [
+    r'\b(FAX|FACSIMILE|TELECOPY)\b',
+    r'\bFAX\s*(NO|NUMBER|#)?[:\s]*\(?\d{3}\)?[-\s]?\d{3}[-\s]?\d{4}',
+    r'\b(FROM|TO|DATE|RE|SUBJECT|PAGES?)\s*:',  # Common fax form fields
+]
+
+TYPED_INDICATOR_PATTERNS = [
+    r'\bDEPARTMENT\s+OF\b',  # Government docs
+    r'\b(FORM|APPLICATION|CERTIFICATE)\s+\d+',  # Forms
+    r'\bOFFICIAL\s+USE\s+ONLY\b',
+    r'\bPRINT\s+NAME\b',  # Form instruction
+    r'\bSIGNATURE\s+DATE\b',
+    r'\b(?:PAGE|PG|P)\s*\d+\s*(?:OF|/)\s*\d+',  # Page numbers
+]
+
+
+def detect_typed_document_indicators(text: str) -> dict:
+    """
+    Detect text patterns that indicate a typed/form/fax document.
+    
+    This is used to catch misclassified typed documents that were
+    incorrectly classified as handwritten based on image features.
+    
+    Args:
+        text: OCR text from the document
+        
+    Returns:
+        dict with:
+        - 'is_likely_typed': bool indicating strong typed indicators found
+        - 'fax_indicators': list of matched fax patterns
+        - 'form_indicators': list of matched form patterns
+        - 'confidence_boost': suggested boost to typed score (0.0 to 0.25)
+    """
+    result = {
+        'is_likely_typed': False,
+        'fax_indicators': [],
+        'form_indicators': [],
+        'confidence_boost': 0.0
+    }
+    
+    if not text:
+        return result
+    
+    text_upper = text.upper()
+    
+    # Check fax patterns
+    for pattern in FAX_HEADER_PATTERNS:
+        if re.search(pattern, text_upper):
+            result['fax_indicators'].append(pattern)
+    
+    # Check typed/form patterns
+    for pattern in TYPED_INDICATOR_PATTERNS:
+        if re.search(pattern, text_upper):
+            result['form_indicators'].append(pattern)
+    
+    # Calculate confidence boost
+    fax_count = len(result['fax_indicators'])
+    form_count = len(result['form_indicators'])
+    
+    if fax_count >= 2:
+        result['confidence_boost'] = 0.25
+        result['is_likely_typed'] = True
+    elif fax_count == 1 and form_count >= 1:
+        result['confidence_boost'] = 0.20
+        result['is_likely_typed'] = True
+    elif form_count >= 3:
+        result['confidence_boost'] = 0.15
+        result['is_likely_typed'] = True
+    elif fax_count == 1 or form_count >= 2:
+        result['confidence_boost'] = 0.10
+    
+    return result
+
+
+
+
+# ============================================================================
+# Date Format Validation
+# ============================================================================
+
+# Common date patterns
+DATE_PATTERNS = [
+    # MM/DD/YYYY or MM-DD-YYYY
+    (r'(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})', 'MM/DD/YYYY'),
+    # MM/DD/YY or MM-DD-YY
+    (r'(\d{1,2})[/\-](\d{1,2})[/\-](\d{2})(?!\d)', 'MM/DD/YY'),
+    # Month DD, YYYY
+    (r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[a-z]*\.?\s+(\d{1,2}),?\s+(\d{4})', 'Month DD, YYYY'),
+]
+
+
+def validate_date_format(text: str) -> dict:
+    """
+    Extract and validate date patterns in OCR text.
+    
+    Detects corrupted dates like "414,00" (should be "4/14/00")
+    or "12/0/98" (missing digit).
+    
+    Args:
+        text: OCR text that may contain dates
+        
+    Returns:
+        dict with:
+        - 'dates': list of detected date info
+        - 'validation_status': 'valid', 'suspicious', or 'none'
+    """
+    result = {
+        'dates': [],
+        'validation_status': 'none'
+    }
+    
+    if not text:
+        return result
+    
+    has_suspicious = False
+    
+    for pattern, format_name in DATE_PATTERNS:
+        for match in re.finditer(pattern, text, re.IGNORECASE):
+            date_info = {
+                'raw': match.group(0),
+                'format': format_name,
+                'valid': True,
+                'issues': []
+            }
+            
+            groups = match.groups()
+            
+            # Validate numeric date parts
+            if format_name in ['MM/DD/YYYY', 'MM/DD/YY']:
+                month = groups[0]
+                day = groups[1]
+                
+                # Check month validity (1-12)
+                try:
+                    month_int = int(month)
+                    if month_int < 1 or month_int > 12:
+                        date_info['issues'].append('invalid_month')
+                        date_info['valid'] = False
+                except ValueError:
+                    date_info['issues'].append('non_numeric_month')
+                    date_info['valid'] = False
+                
+                # Check day validity (1-31)
+                try:
+                    day_int = int(day)
+                    if day_int < 1 or day_int > 31:
+                        date_info['issues'].append('invalid_day')
+                        date_info['valid'] = False
+                    if day_int == 0:  # Common OCR error
+                        date_info['issues'].append('missing_digit')
+                        date_info['valid'] = False
+                except ValueError:
+                    date_info['issues'].append('non_numeric_day')
+                    date_info['valid'] = False
+            
+            if date_info['issues']:
+                has_suspicious = True
+            
+            result['dates'].append(date_info)
+    
+    # Also check for corrupted date patterns (e.g., "414,00")
+    corrupted_patterns = [
+        (r'(\d{3}),(\d{2})(?!\d)', 'possible_corrupted_date'),  # 414,00
+        (r'(\d{1,2})/0/(\d{2})', 'missing_digit'),  # 12/0/98
+    ]
+    
+    for pattern, issue_type in corrupted_patterns:
+        for match in re.finditer(pattern, text):
+            result['dates'].append({
+                'raw': match.group(0),
+                'format': 'corrupted',
+                'valid': False,
+                'issues': [issue_type]
+            })
+            has_suspicious = True
+    
+    # Set overall status
+    if result['dates']:
+        if has_suspicious:
+            result['validation_status'] = 'suspicious'
+        else:
+            result['validation_status'] = 'valid'
+    
+    return result
+
+
+def add_date_validation_to_element(element: dict) -> dict:
+    """
+    Add date validation status to a text element if it contains dates.
+    """
+    if element.get('type') != 'text':
+        return element
+    
+    content = element.get('content', '')
+    if not content:
+        return element
+    
+    # Quick check for date-like content
+    if not re.search(r'\d+[/\-]', content) and not re.search(r'(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)', content, re.I):
+        return element
+    
+    validation = validate_date_format(content)
+    
+    if validation['dates']:
+        element['date_validation'] = {
+            'status': validation['validation_status'],
+            'dates': validation['dates']
+        }
+    
+    return element
+
+
+
+# ============================================================================
+# Phone Number Validation
+# ============================================================================
+
+# Phone patterns for common US formats
+PHONE_PATTERNS = [
+    # (xxx) xxx-xxxx or (xxx)xxx-xxxx
+    r'\((\d{3})\)\s*(\d{3})[- ]?(\d{4})',
+    # xxx-xxx-xxxx
+    r'(\d{3})-(\d{3})-(\d{4})',
+    # xxx/xxx-xxxx
+    r'(\d{3})/(\d{3})-(\d{4})',
+    # xxx xxx xxxx or xxx xxx-xxxx
+    r'(\d{3})\s+(\d{3})[- ]?(\d{4})',
+    # xxxxxxxxxx (10 digits no separator)
+    r'(?<!\d)(\d{3})(\d{3})(\d{4})(?!\d)',
+]
+
+# Patterns that look like phone numbers but aren't (e.g., ZIP+4, dates)
+FALSE_POSITIVE_PATTERNS = [
+    r'\d{5}-\d{4}',  # ZIP+4 codes
+    r'\d{1,2}/\d{1,2}/\d{2,4}',  # Dates
+    r'\d{4}/\d{2}/\d{2}',  # ISO dates
+]
+
+
+def validate_phone_number(text: str) -> dict:
+    """
+    Extract and validate phone numbers from OCR text.
+    
+    Detects common phone number formats and validates digit count.
+    Does NOT auto-correct - only flags issues for human review.
+    
+    Args:
+        text: OCR text that may contain phone numbers
+        
+    Returns:
+        dict with:
+        - 'phones': list of extracted phone numbers
+        - 'validation_status': 'valid', 'suspicious', 'invalid', or 'none'
+        - 'issues': list of detected issues
+    """
+    result = {
+        'phones': [],
+        'validation_status': 'none',
+        'issues': []
+    }
+    
+    if not text:
+        return result
+    
+    # Check for false positives first
+    for fp_pattern in FALSE_POSITIVE_PATTERNS:
+        if re.search(fp_pattern, text):
+            # Don't extract this as a phone number
+            return result
+    
+    # Extract phone numbers
+    for pattern in PHONE_PATTERNS:
+        matches = re.finditer(pattern, text)
+        for match in matches:
+            groups = match.groups()
+            if len(groups) >= 3:
+                area_code = groups[0]
+                prefix = groups[1]
+                line = groups[2]
+                
+                # Validate digit counts
+                issues = []
+                
+                if len(area_code) != 3:
+                    issues.append(f'area_code_length:{len(area_code)}')
+                if len(prefix) != 3:
+                    issues.append(f'prefix_length:{len(prefix)}')
+                if len(line) != 4:
+                    issues.append(f'line_length:{len(line)}')
+                
+                # Check for suspicious patterns
+                total_digits = len(area_code) + len(prefix) + len(line)
+                if total_digits < 10:
+                    issues.append(f'missing_digits:{10-total_digits}')
+                elif total_digits > 10:
+                    issues.append(f'extra_digits:{total_digits-10}')
+                
+                # Check for repeated digits (suspicious OCR errors)
+                full_number = area_code + prefix + line
+                if re.match(r'^(\d)\1{5,}$', full_number):
+                    issues.append('repeated_digits')
+                
+                phone_data = {
+                    'raw': match.group(0),
+                    'normalized': f'({area_code}) {prefix}-{line}',
+                    'area_code': area_code,
+                    'prefix': prefix,
+                    'line': line,
+                    'total_digits': total_digits
+                }
+                
+                if issues:
+                    phone_data['issues'] = issues
+                
+                result['phones'].append(phone_data)
+    
+    # Determine overall validation status
+    if not result['phones']:
+        result['validation_status'] = 'none'
+    else:
+        all_valid = True
+        any_suspicious = False
+        
+        for phone in result['phones']:
+            if 'issues' in phone:
+                if any('missing' in i or 'extra' in i for i in phone['issues']):
+                    any_suspicious = True
+                if any('repeated' in i for i in phone['issues']):
+                    all_valid = False
+        
+        if not all_valid:
+            result['validation_status'] = 'invalid'
+        elif any_suspicious:
+            result['validation_status'] = 'suspicious'
+        else:
+            result['validation_status'] = 'valid'
+    
+    return result
+
+
+def add_phone_validation_to_element(element: dict) -> dict:
+    """
+    Add phone validation status to a text element if it contains phone numbers.
+    
+    Args:
+        element: Text element dictionary with 'content' key
+        
+    Returns:
+        Element with phone validation fields added (if applicable)
+    """
+    if element.get('type') != 'text':
+        return element
+    
+    content = element.get('content', '')
+    if not content:
+        return element
+    
+    # Check for phone-related keywords to reduce unnecessary processing
+    phone_keywords = ['phone', 'fax', 'tel', 'call', '(', '-']
+    has_keyword = any(kw.lower() in content.lower() for kw in phone_keywords)
+    has_digits = bool(re.search(r'\d{3}', content))
+    
+    if not (has_keyword and has_digits):
+        return element
+    
+    validation = validate_phone_number(content)
+    
+    if validation['phones']:
+        element['phone_validation'] = {
+            'status': validation['validation_status'],
+            'phones': validation['phones']
+        }
+    
+    return element
+
+
 def bbox_overlap(bbox1: List[float], bbox2: List[float]) -> float:
     """
     Calculate the overlap ratio between two bounding boxes.
@@ -912,6 +1293,19 @@ def postprocess_output(output_data: Dict[str, Any]) -> Dict[str, Any]:
         # Step 4: Normalize phone numbers
         elements = normalize_phone_numbers(elements)
         
+        # Step 5: Classification refinement (detect misclassified typed docs)
+        # Collect all text for typed document indicator detection
+        all_text = ' '.join([e.get('content', '') for e in elements if e.get('type') == 'text'])
+        typed_indicators = detect_typed_document_indicators(all_text)
+        
+        if typed_indicators['is_likely_typed']:
+            page['classification_refinement'] = {
+                'likely_typed': True,
+                'fax_indicators': len(typed_indicators['fax_indicators']),
+                'form_indicators': len(typed_indicators['form_indicators']),
+                'suggested_boost': typed_indicators['confidence_boost']
+            }
+        
         page["elements"] = elements
     
     return output_data
@@ -979,7 +1373,7 @@ def process_hallucinations(elements: List[Dict]) -> List[Dict]:
         # Calculate hallucination score
         score, signals = calculate_hallucination_score(content, confidence, bbox)
         
-        if score > 0.70:
+        if score > 0.60:
             # High hallucination likelihood - remove
             continue
         elif score > 0.40:
@@ -1093,6 +1487,12 @@ def check_character_patterns(content: str) -> Tuple[float, List[str]]:
         score += 0.5
         patterns.append("short_numbers")
     
+    # Isolated year patterns (common hallucinations from fine print)
+    # Matches: 1907, 1960s, 2007, etc.
+    if re.match(r'^(19|20)\d{2}s?$', content.strip()):
+        score += 0.5
+        patterns.append("isolated_year")
+    
     return min(score, 1.0), patterns
 
 
@@ -1162,6 +1562,70 @@ def has_repetition_pattern(content: str) -> bool:
         return True
     
     return False
+
+
+# ============================================================================
+# Handwriting OCR Correction (Applied only to handwritten documents)
+# ============================================================================
+
+# Common TrOCR confusion pairs: {wrong: correct} + context words
+OCR_CONFUSION_CORRECTIONS = [
+    # (wrong_word, correct_word, prev_context, next_context)
+    ('last', 'lost', ['i', 'have', "i've", 'we'], ['my', 'the', 'track']),
+    ('book', 'look', ['to', 'please', "can't"], ['at', 'for', 'into']),
+]
+
+# Words that commonly appear with prefixes that TrOCR misses
+PREFIX_CORRECTIONS = {
+    'cuckolded': 'uncuckolded',
+    'fortunate': 'unfortunate', 
+    'known': 'unknown',
+    'able': 'unable',
+    'satisfied': 'dissatisfied',
+    'appear': 'disappear',
+}
+
+
+def apply_ocr_corrections_handwritten(text: str, is_handwritten: bool = False) -> str:
+    """
+    Apply OCR-specific corrections for handwritten documents only.
+    
+    Args:
+        text: OCR text to correct
+        is_handwritten: Whether the source document is handwritten
+        
+    Returns:
+        Corrected text (unchanged if not handwritten)
+    """
+    if not is_handwritten or not text:
+        return text
+    
+    words = text.split()
+    corrected_words = []
+    
+    for i, word in enumerate(words):
+        word_lower = word.lower()
+        corrected = word
+        
+        # Check confusion pairs with context
+        for wrong, correct, prev_ctx, next_ctx in OCR_CONFUSION_CORRECTIONS:
+            if word_lower == wrong:
+                prev_word = words[i - 1].lower() if i > 0 else ""
+                next_word = words[i + 1].lower() if i < len(words) - 1 else ""
+                if prev_word in prev_ctx or next_word in next_ctx:
+                    corrected = correct if word.islower() else correct.capitalize()
+                    break
+        
+        # Check prefix restoration in negation context
+        if word_lower in PREFIX_CORRECTIONS:
+            window = ' '.join(words[max(0, i-2):i]).lower()
+            if any(neg in window for neg in ['not', "n't", 'never', 'but']):
+                restored = PREFIX_CORRECTIONS[word_lower]
+                corrected = restored if word.islower() else restored.capitalize()
+        
+        corrected_words.append(corrected)
+    
+    return ' '.join(corrected_words)
 
 
 def clean_text_content(elements: List[Dict]) -> List[Dict]:
@@ -1286,6 +1750,11 @@ def normalize_phone_numbers(elements: List[Dict]) -> List[Dict]:
             phone_type = detect_phone_type(content)
             if phone_type:
                 element["phone_type"] = phone_type
+            
+            # Add validation status using the validation helper
+            validation_result = validate_phone_number(content)
+            if validation_result['phones']:
+                element["phone_validation_status"] = validation_result['validation_status']
     
     return elements
 
