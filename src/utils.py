@@ -125,6 +125,149 @@ def denoise_image(image):
         print(f"Error denoising image: {e}")
         return image
 
+
+def deskew_image(image, angle_threshold=0.5, max_angle=15.0):
+    """
+    Detect and correct document skew using Hough line detection.
+
+    Analyzes horizontal lines in the document to estimate rotation angle,
+    then applies correction if the skew exceeds the threshold.
+
+    Args:
+        image: PIL Image to deskew
+        angle_threshold: Minimum skew angle (degrees) to trigger correction
+        max_angle: Maximum correction angle (ignore if skew seems too extreme)
+
+    Returns:
+        Deskewed PIL Image (or original if no significant skew detected)
+    """
+    try:
+        # Convert PIL to grayscale numpy array
+        img_np = np.array(image.convert('L'))
+        h, w = img_np.shape
+
+        # Detect edges
+        edges = cv2.Canny(img_np, 50, 150, apertureSize=3)
+
+        # Hough line detection — maxLineGap scaled to image width
+        max_line_gap = max(5, w // 100)
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=50,
+                                minLineLength=w//4, maxLineGap=max_line_gap)
+
+        if lines is None or len(lines) < 10:
+            return image  # Not enough lines to estimate skew
+
+        # Calculate angles of detected lines
+        angles = []
+        for line in lines:
+            x1, y1, x2, y2 = line[0]
+            if abs(x2 - x1) > 10:  # Ignore near-vertical lines
+                angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
+                # Only consider roughly horizontal lines (-30 to 30 degrees)
+                if -30 < angle < 30:
+                    angles.append(angle)
+
+        if len(angles) < 5:
+            return image  # Not enough horizontal lines
+
+        # Use median angle as the skew estimate (robust to outliers)
+        median_angle = np.median(angles)
+
+        # Only correct if skew is significant but not extreme
+        if abs(median_angle) < angle_threshold or abs(median_angle) > max_angle:
+            return image
+
+        print(f"    [DESKEW] Detected skew: {median_angle:.2f} degrees, applying correction")
+
+        # Apply rotation correction
+        img_color = np.array(image)
+        center = (w // 2, h // 2)
+        rotation_matrix = cv2.getRotationMatrix2D(center, median_angle, 1.0)
+
+        # Calculate new image dimensions to avoid cropping
+        cos = np.abs(rotation_matrix[0, 0])
+        sin = np.abs(rotation_matrix[0, 1])
+        new_w = int((h * sin) + (w * cos))
+        new_h = int((h * cos) + (w * sin))
+
+        # Adjust the rotation matrix
+        rotation_matrix[0, 2] += (new_w / 2) - center[0]
+        rotation_matrix[1, 2] += (new_h / 2) - center[1]
+
+        # Apply affine transformation with white background
+        rotated = cv2.warpAffine(img_color, rotation_matrix, (new_w, new_h),
+                                 borderMode=cv2.BORDER_CONSTANT,
+                                 borderValue=(255, 255, 255))
+
+        return Image.fromarray(rotated)
+
+    except Exception as e:
+        print(f"Warning: Deskew failed: {e}")
+        return image
+
+
+def split_line_bbox_to_words(line_bbox, words, min_word_width=10):
+    """
+    Split a line-level bounding box into word-level bboxes.
+
+    Distributes the line width proportionally based on word lengths (character count).
+    This is an approximation since we don't have character-level metrics, but it's
+    significantly better than using identical bboxes for all words in a line.
+
+    Args:
+        line_bbox: [x1, y1, x2, y2] - the line's bounding box
+        words: List of word strings in the line
+        min_word_width: Minimum width for each word bbox
+
+    Returns:
+        List of [x1, y1, x2, y2] bboxes, one per word
+    """
+    if not words:
+        return []
+
+    if len(words) == 1:
+        return [line_bbox]
+
+    x1, y1, x2, y2 = line_bbox
+    line_width = x2 - x1
+    line_height = y2 - y1
+
+    # Calculate total characters (with minimum length of 1 per word)
+    word_lengths = [max(len(w), 1) for w in words]
+    total_chars = sum(word_lengths)
+
+    # Add spacing estimate (roughly 0.5 char width per space between words)
+    space_count = len(words) - 1
+    total_chars_with_spacing = total_chars + (space_count * 0.5)
+
+    if total_chars_with_spacing <= 0:
+        # Fallback: equal distribution
+        word_width = line_width / len(words)
+        return [[x1 + i * word_width, y1, x1 + (i + 1) * word_width, y2]
+                for i in range(len(words))]
+
+    # Calculate width per unit (character)
+    width_per_char = line_width / total_chars_with_spacing
+
+    # Generate word bboxes
+    word_bboxes = []
+    current_x = x1
+
+    for i, (word, word_len) in enumerate(zip(words, word_lengths)):
+        # Word width based on character count
+        word_width = max(word_len * width_per_char, min_word_width)
+
+        # Don't exceed line bounds
+        word_x2 = min(current_x + word_width, x2)
+
+        word_bboxes.append([current_x, y1, word_x2, y2])
+
+        # Move to next word position (add space width)
+        current_x = word_x2 + (0.5 * width_per_char)
+
+    return word_bboxes
+
+
 def cluster_text_rows(elements, y_threshold=15):
     """
     Clusters text elements into rows based on Y-coordinate alignment.
@@ -267,13 +410,13 @@ class SpellCorrector:
             if not clean_word:
                 corrected_words.append(word)
                 continue
-            
-            # 3. Starts with Uppercase (Skip proper nouns/Acronyms)
-            if clean_word[0].isupper():
+
+            # 3. Skip pure acronyms (all uppercase, 2-5 chars) - likely intentional abbreviations
+            if clean_word.isupper() and 2 <= len(clean_word) <= 5:
                 corrected_words.append(word)
                 continue
 
-            # 4. Domain Dictionary Check
+            # 4. Domain Dictionary Check (case-insensitive)
             if clean_word.lower() in self.domain_words:
                  corrected_words.append(word)
                  continue
@@ -393,14 +536,14 @@ def classify_document_type(image):
         
         # Angle variance: low = typed, HIGH = handwritten (ENHANCED WEIGHTING)
         # High angle variance is a strong indicator of handwriting
-        # BUT only penalize if not a clear form document (form_score < 0.5)
+        # BUT only penalize if not a clear form document (form_score < 0.3)
         if angle_score < 400:
             typed_score += 0.10  # Very uniform angles (likely typed)
         elif angle_score < 800:
             typed_score += 0.05  # Somewhat uniform (reduced from 0.15)
-        elif angle_score > 1500 and form_score < 0.5:
+        elif angle_score > 1500 and form_score < 0.3:
             typed_score -= 0.15  # High variance + not a form = strongly handwritten
-        elif angle_score > 1200 and form_score < 0.5:
+        elif angle_score > 1200 and form_score < 0.3:
             typed_score -= 0.08  # Moderate-high variance + not a form = likely handwritten
         
         # Edge density: moderate = typed
@@ -409,13 +552,14 @@ def classify_document_type(image):
         elif edge_score < 0.02:
             typed_score += 0.04
         
-        # BOOSTED: Form structure - strong indicator of typed/form document
+        # Form structure - strong indicator of typed/form document
+        # Weight reduced from 0.35 to 0.30 to limit single-signal dominance
         if form_score > 0.5:
-            typed_score += 0.35  # Strong form structure (boosted from 0.25)
+            typed_score += 0.30
         elif form_score > 0.2:
-            typed_score += 0.25  # Some form elements (boosted from 0.15)
+            typed_score += 0.20
         elif form_score > 0.1:
-            typed_score += 0.15  # Minimal form elements
+            typed_score += 0.12
         
         # Character uniformity - typed has uniform heights
         if uniformity_score > 0.7:
@@ -443,7 +587,23 @@ def classify_document_type(image):
         if is_ruled_paper_handwriting:
             typed_score -= 0.12  # Bias toward handwritten
             print(f"    [DEBUG] Ruled paper handwriting detected: -0.12 adjustment")
-        
+
+        # TARGETED: Sparse/blank form detection
+        # Blank forms with minimal text should NOT be classified as mixed/handwritten
+        # Conditions: very low edge density (sparse text) + form structure present
+        # But NOT if ruled paper handwriting was detected (those are contradictory)
+        is_sparse_form = (
+            edge_score < 0.02 and  # Very low text density (mostly blank)
+            form_score > 0.15 and  # But has form structure (lines, boxes)
+            not is_ruled_paper_handwriting  # Not handwriting on ruled paper
+        )
+        if is_sparse_form and typed_score < 0.65:
+            typed_score = 0.65  # Force to typed threshold for blank forms
+            print(f"    [DEBUG] Sparse/blank form detected: forcing typed classification")
+
+        # Clamp to valid range — accumulated weights can exceed [0, 1]
+        typed_score = max(0.0, min(typed_score, 1.0))
+
         # DEBUG LOGGING: Output all scoring variables
         print(f"    [DEBUG] Classification Scores:")
         print(f"      - stroke_score: {stroke_score:.3f} (low=typed)")
@@ -457,7 +617,7 @@ def classify_document_type(image):
         print(f"      - has_fax_header: {has_fax_header}")
         print(f"    [DEBUG] Final typed_score: {typed_score:.3f}")
         print(f"      - Thresholds: typed>=0.65, handwritten<=0.45, else mixed")
-        
+
         # Determine classification with confidence
         # Threshold: typed >= 0.65, handwritten <= 0.45, else mixed
         # Adjusted thresholds for better separation with signature isolation
@@ -520,6 +680,51 @@ def _detect_signature_in_region(region):
         return False
 
 
+def detect_signature_region(image):
+    """
+    Detect if the bottom region of a document contains a handwritten signature.
+
+    Returns:
+        dict with keys:
+            - 'has_signature': bool - whether a signature was detected
+            - 'region_bbox': [x1, y1, x2, y2] - bbox of signature region (bottom 20%)
+              in pixel coordinates if signature detected, None otherwise
+
+    The bbox coordinates are normalized to 0-1 range relative to image dimensions.
+    """
+    try:
+        # Convert to grayscale numpy array
+        if hasattr(image, 'mode'):  # PIL Image
+            gray = np.array(image.convert('L'))
+        else:
+            gray = image
+
+        h, w = gray.shape[:2] if len(gray.shape) >= 2 else (gray.shape[0], 1)
+
+        # Signature region is bottom 20% of page
+        signature_region_start = int(h * 0.80)
+        signature_region = gray[signature_region_start:, :]
+
+        has_signature = _detect_signature_in_region(signature_region)
+
+        if has_signature:
+            # Return normalized bbox (0-1 range)
+            return {
+                'has_signature': True,
+                'region_bbox': [0.0, 0.80, 1.0, 1.0]  # [x1, y1, x2, y2] normalized
+            }
+        else:
+            return {
+                'has_signature': False,
+                'region_bbox': None
+            }
+    except Exception:
+        return {
+            'has_signature': False,
+            'region_bbox': None
+        }
+
+
 def _detect_fax_header(header_region):
     """
     Detect fax/letterhead header patterns.
@@ -533,8 +738,11 @@ def _detect_fax_header(header_region):
         # Binarize
         _, binary = cv2.threshold(header_region, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         
+        # Scale kernel to header width. At 1000px width: kernel = 50, matching original.
+        kernel_w = max(25, header_region.shape[1] // 20)
+
         # Check for horizontal lines (fax separator lines)
-        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (50, 1))
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_w, 1))
         horizontal_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horizontal_kernel)
         h_line_pixels = np.count_nonzero(horizontal_lines)
         
@@ -595,16 +803,24 @@ def _calculate_line_regularity(gray):
     Returns: 0.0 (irregular) to 1.0 (regular)
     """
     try:
+        h, w = gray.shape
+
         # Detect edges
         edges = cv2.Canny(gray, 50, 150)
-        
+
+        # Scale Hough parameters to image width so line detection works across
+        # resolutions. At 1000px width: minLineLength=30, maxLineGap=10,
+        # matching the original hardcoded values.
+        min_line_len = max(15, w // 33)
+        max_line_gap = max(5, w // 100)
+
         # Hough line detection
-        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=50, 
-                                minLineLength=30, maxLineGap=10)
-        
+        lines = cv2.HoughLinesP(edges, 1, np.pi/180, threshold=50,
+                                minLineLength=min_line_len, maxLineGap=max_line_gap)
+
         if lines is None or len(lines) < 5:
             return 0.5
-        
+
         # Calculate angles of detected lines
         angles = []
         for line in lines:
@@ -612,16 +828,16 @@ def _calculate_line_regularity(gray):
             if x2 - x1 != 0:
                 angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
                 angles.append(abs(angle))
-        
+
         if not angles:
             return 0.5
-        
+
         # Count near-horizontal lines (within 5 degrees)
         horizontal_count = sum(1 for a in angles if a < 5 or a > 175)
         regularity = horizontal_count / len(angles)
-        
+
         return regularity
-        
+
     except Exception:
         return 0.5
 
@@ -632,20 +848,26 @@ def _calculate_angle_variance(gray):
     Returns raw variance value (lower = more typed).
     """
     try:
+        # Scale contour area threshold to image size so small images don't
+        # filter out all characters. At 1000x750 (750K pixels): threshold = 50,
+        # matching the original hardcoded value.
+        total_pixels = gray.shape[0] * gray.shape[1]
+        min_contour_area = max(20, total_pixels // 15000)
+
         edges = cv2.Canny(gray, 50, 150)
         contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
+
         angles = []
         for contour in contours:
-            if cv2.contourArea(contour) > 50 and len(contour) >= 5:
+            if cv2.contourArea(contour) > min_contour_area and len(contour) >= 5:
                 ellipse = cv2.fitEllipse(contour)
                 angles.append(ellipse[2])
-        
+
         if not angles:
             return 1000  # Default middle value
-        
+
         return np.var(angles)
-        
+
     except Exception:
         return 1000
 
@@ -673,32 +895,41 @@ def _detect_form_structure(gray):
     Returns: 0.0 (no structure) to 1.0 (strong form structure)
     """
     try:
+        h, w = gray.shape
+
         # Binarize
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-        
+
+        # Scale kernel sizes to image dimensions so line detection works across
+        # resolutions. At 1000px width (standard resize target): kernel_w = 40,
+        # matching the original hardcoded value. Smaller images get proportionally
+        # smaller kernels to maintain ~4% of dimension sensitivity.
+        kernel_w = max(20, w // 25)
+        kernel_h = max(20, h // 25)
+
         # Detect horizontal lines using morphology
-        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (40, 1))
+        horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_w, 1))
         horizontal_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horizontal_kernel)
-        
+
         # Detect vertical lines using morphology
-        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 40))
+        vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, kernel_h))
         vertical_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, vertical_kernel)
-        
+
         # Count line pixels
         h_line_pixels = np.count_nonzero(horizontal_lines)
         v_line_pixels = np.count_nonzero(vertical_lines)
         total_line_pixels = h_line_pixels + v_line_pixels
-        
-        total_pixels = gray.shape[0] * gray.shape[1]
-        
+
+        total_pixels = h * w
+
         # Normalize: typical form has ~0.5-2% line coverage
         line_ratio = total_line_pixels / total_pixels if total_pixels > 0 else 0
-        
+
         # Scale to 0-1 (0.01 = strong form indicator)
         form_score = min(line_ratio / 0.01, 1.0)
-        
+
         return form_score
-        
+
     except Exception:
         return 0.0
 

@@ -7,7 +7,7 @@ from surya.detection import DetectionPredictor
 
 from surya.recognition import RecognitionPredictor, FoundationPredictor
 from langdetect import detect, LangDetectException
-from src.utils import load_image, convert_pdf_to_images, crop_image, pad_bbox, denoise_image, cluster_text_rows, is_bbox_too_large, SpellCorrector, classify_document_type
+from src.utils import load_image, convert_pdf_to_images, crop_image, pad_bbox, denoise_image, deskew_image, cluster_text_rows, is_bbox_too_large, SpellCorrector, classify_document_type, detect_signature_region, split_line_bbox_to_words
 from src.models.handwriting import HandwritingRecognizer
 from src.models.table import TableRecognizer
 from src.models.layout import LayoutAnalyzer
@@ -111,8 +111,9 @@ class DocumentProcessor:
         return "en" # Default to English as per user request
 
     def process_page(self, image, page_num):
-        # 0. Pre-processing: Denoise
+        # 0. Pre-processing: Denoise and Deskew
         image = denoise_image(image)
+        image = deskew_image(image)
         width, height = image.width, image.height
         
         page_content = {
@@ -128,6 +129,69 @@ class DocumentProcessor:
         page_content["classification_confidence"] = doc_confidence
         print(f"  Document classification: {doc_type} (confidence: {doc_confidence:.2f})")
 
+        # Detect signature region for flagging
+        signature_info = detect_signature_region(image)
+        if signature_info['has_signature']:
+            page_content["signature_detected"] = True
+            print(f"  Signature region detected in bottom 20% of page")
+
+        # Detect signature bboxes with Florence-2 for ensemble gating
+        # This gives us actual pixel-level signature locations (not just bottom 20%)
+        signature_bboxes = []
+        try:
+            sig_results = self.run_florence(image, "<CAPTION_TO_PHRASE_GROUNDING>", text_input="signature")
+            if '<CAPTION_TO_PHRASE_GROUNDING>' in sig_results:
+                for bbox, label in zip(sig_results['<CAPTION_TO_PHRASE_GROUNDING>']['bboxes'],
+                                       sig_results['<CAPTION_TO_PHRASE_GROUNDING>']['labels']):
+                    if 'signature' in label.lower():
+                        signature_bboxes.append(bbox)
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+        # Detect handwritten regions with Florence-2 for line-level routing
+        # Catches fill-in values, annotations, and names on typed forms
+        HANDWRITING_GROUNDING_PROMPT = "handwritten text"
+        handwriting_bboxes = []
+        try:
+            hw_results = self.run_florence(image, "<CAPTION_TO_PHRASE_GROUNDING>", text_input=HANDWRITING_GROUNDING_PROMPT)
+            if '<CAPTION_TO_PHRASE_GROUNDING>' in hw_results:
+                for bbox, label in zip(hw_results['<CAPTION_TO_PHRASE_GROUNDING>']['bboxes'],
+                                       hw_results['<CAPTION_TO_PHRASE_GROUNDING>']['labels']):
+                    handwriting_bboxes.append(bbox)
+            torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+        # Build unified handwritten_regions list with type metadata
+        # Signature regions get stricter TrOCR gating (0.90), handwriting gets normal ensemble
+        handwritten_regions = []
+        for sb in signature_bboxes:
+            handwritten_regions.append({'bbox': sb, 'type': 'signature'})
+
+        for hb in handwriting_bboxes:
+            # De-duplicate: skip handwriting bboxes that overlap >50% with a signature bbox
+            overlaps_signature = False
+            for sb in signature_bboxes:
+                # Calculate overlap ratio (intersection / handwriting bbox area)
+                ix1 = max(hb[0], sb[0])
+                iy1 = max(hb[1], sb[1])
+                ix2 = min(hb[2], sb[2])
+                iy2 = min(hb[3], sb[3])
+                if ix2 > ix1 and iy2 > iy1:
+                    intersection = (ix2 - ix1) * (iy2 - iy1)
+                    hb_area = (hb[2] - hb[0]) * (hb[3] - hb[1])
+                    if hb_area > 0 and intersection / hb_area > 0.50:
+                        overlaps_signature = True
+                        break
+            if not overlaps_signature:
+                handwritten_regions.append({'bbox': hb, 'type': 'handwriting'})
+
+        if handwriting_bboxes:
+            print(f"  Florence-2 handwriting regions: {len(handwriting_bboxes)} detected, {len([r for r in handwritten_regions if r['type'] == 'handwriting'])} after dedup")
+        if signature_bboxes:
+            print(f"  Florence-2 signature regions: {len(signature_bboxes)} detected")
+
         # 1. Run Surya OCR for text
         predictions = self.rec_predictor([image], ['ocr_with_boxes'], self.det_predictor)
         ocr_result = predictions[0]
@@ -141,55 +205,81 @@ class DocumentProcessor:
         all_text_content = [] 
         
         for line in ocr_result.text_lines:
-            # Filter low confidence hallucinations
-            if line.confidence < self.TEXT_CONFIDENCE_THRESHOLD:
+            # Lower confidence threshold for lines overlapping handwriting/signature regions
+            # Surya may detect handwritten text but with low confidence — let it through
+            # so the per-line routing can send it to TrOCR
+            in_hw_region = any(
+                line.bbox[0] < r['bbox'][2] and line.bbox[2] > r['bbox'][0] and
+                line.bbox[1] < r['bbox'][3] and line.bbox[3] > r['bbox'][1]
+                for r in handwritten_regions
+            )
+            min_confidence = 0.15 if in_hw_region else self.TEXT_CONFIDENCE_THRESHOLD
+            if line.confidence < min_confidence:
                 continue
             
             final_text = line.text
             source_model = "surya"
             
-            # Improved Hybrid Approach based on classification confidence:
-            # 1. If "handwritten" with high confidence -> use TrOCR
-            # 2. If "typed" with high confidence -> use Surya
-            # 3. If "mixed" or low confidence -> run both, take best result
-            
+            # --- Per-line routing: check Florence-2 handwritten regions first ---
+            # If a Surya line overlaps a detected handwritten region, force ensemble
+            # regardless of page-level classification. This lets TrOCR handle
+            # handwritten fill-ins, names, and annotations on typed forms.
+            line_hw_region_type = None  # None, 'signature', or 'handwriting'
+            for region in handwritten_regions:
+                rb = region['bbox']
+                if (line.bbox[0] < rb[2] and line.bbox[2] > rb[0] and
+                    line.bbox[1] < rb[3] and line.bbox[3] > rb[1]):
+                    line_hw_region_type = region['type']
+                    break  # Use first overlapping region (signature takes priority due to list order)
+
             run_handwriting_model = False
             use_ensemble = False
-            
-            if doc_type == "handwritten" and doc_confidence >= 0.45:
+
+            if line_hw_region_type is not None:
+                # Line overlaps a Florence-2 detected handwritten region → ensemble
+                use_ensemble = True
+            elif doc_type == "handwritten" and doc_confidence >= 0.45:
                 run_handwriting_model = True
             elif doc_type == "mixed" or doc_confidence < 0.45:
-                # Uncertain classification - use ensemble approach
                 use_ensemble = True
             elif doc_type == "typed" and line.confidence < 0.6:
-                # Typed document but low-confidence line - try TrOCR
                 if len(line.text.strip()) > 0:
                     run_handwriting_model = True
-            
+
             if use_ensemble:
                 # Run both OCR engines, pick the one with higher confidence
-                # Add padding to bbox to prevent cutting off descenders (g, y, p, q)
                 padded_bbox = pad_bbox(line.bbox, 12, width, height)
                 line_crop = crop_image(image, padded_bbox)
-                hw_text = self.handwriting_recognizer.recognize(line_crop)
-                
-                # Compare: prefer Surya if confidence is high, else use TrOCR
-                if line.confidence >= 0.8:
-                    final_text = line.text
-                    source_model = "surya"
-                elif hw_text and len(hw_text.strip()) > 0:
-                    # Normalize punctuation spacing in TrOCR output
-                    final_text = normalize_punctuation_spacing(hw_text)
-                    source_model = "trocr"
-                # else keep surya result
-                    
+                hw_text, hw_conf = self.handwriting_recognizer.recognize(line_crop)
+
+                surya_conf = line.confidence
+                trocr_valid = hw_text and len(hw_text.strip()) > 0
+
+                if line_hw_region_type == 'signature':
+                    # Signature regions: require high TrOCR confidence (0.90 gate)
+                    # to prevent hallucinations on cursive strokes
+                    if trocr_valid and hw_conf > surya_conf and hw_conf >= 0.90:
+                        final_text = normalize_punctuation_spacing(hw_text)
+                        source_model = "trocr"
+                    else:
+                        final_text = line.text
+                        source_model = "surya"
+                else:
+                    # Handwriting regions or page-level ensemble: normal gate
+                    if trocr_valid and hw_conf > surya_conf:
+                        final_text = normalize_punctuation_spacing(hw_text)
+                        source_model = "trocr"
+                    else:
+                        final_text = line.text
+                        source_model = "surya"
+
             elif run_handwriting_model:
                # Crop the line area with padding to prevent cutting off descenders
                padded_bbox = pad_bbox(line.bbox, 12, width, height)
                line_crop = crop_image(image, padded_bbox)
                # Use TrOCR
-               hw_text = self.handwriting_recognizer.recognize(line_crop)
-               if hw_text and len(hw_text.strip()) > 0:
+               hw_text, hw_conf = self.handwriting_recognizer.recognize(line_crop)
+               if hw_text and len(hw_text.strip()) > 0 and hw_conf >= 0.15:
                    # Normalize punctuation spacing in TrOCR output
                    final_text = normalize_punctuation_spacing(hw_text)
                    source_model = "trocr"
@@ -201,11 +291,20 @@ class DocumentProcessor:
             text_element = {
                 "type": "text",
                 "content": corrected_text,
-                "bbox": line.bbox, 
+                "bbox": line.bbox,
                 "confidence": line.confidence,
                 "source_model": source_model
             }
-            
+
+            # Flag elements in signature region as having uncertain transcription
+            # Signature region is bottom 20% of page (y >= 0.80 normalized)
+            if signature_info['has_signature']:
+                # Normalize bbox y-coordinates to 0-1 range
+                bbox_y_normalized = line.bbox[1] / height if height > 0 else 0
+                if bbox_y_normalized >= 0.75:  # Allow some margin (75% instead of 80%)
+                    text_element["in_signature_region"] = True
+                    text_element["transcription_uncertain"] = True
+
             # Add phone and date validation (flags only, no auto-correct)
             text_element = add_phone_validation_to_element(text_element)
             text_element = add_date_validation_to_element(text_element)
@@ -214,13 +313,63 @@ class DocumentProcessor:
             all_text_content.append(corrected_text)
             
             # Collect for Layout Analysis
-            # Split text into words for LayoutLMv3, reusing the line bbox 
-            # (Approximation: Ideally we have word-level bboxes, but line-level is acceptable for region layout)
+            # Split text into words for LayoutLMv3 with word-level bbox estimation
+            # This improves LayoutLMv3's spatial reasoning by providing distinct bboxes per word
             line_words = corrected_text.split()
-            ocr_words.extend(line_words)
-            ocr_boxes.extend([line.bbox] * len(line_words))
+            if line_words:
+                word_bboxes = split_line_bbox_to_words(line.bbox, line_words)
+                ocr_words.extend(line_words)
+                ocr_boxes.extend(word_bboxes)
 
             
+        # Gap-fill: Run TrOCR directly on signature regions that Surya missed
+        # Surya's line detector sometimes doesn't create text lines for cursive
+        # handwriting (e.g., "Leonard H Jones", "Lynnette Kaye Stevens").
+        # For signature regions with low Surya coverage, crop and try TrOCR.
+        for region in handwritten_regions:
+            if region['type'] != 'signature':
+                continue
+            rb = region['bbox']
+            region_area = (rb[2] - rb[0]) * (rb[3] - rb[1])
+            if region_area <= 0:
+                continue
+
+            # Calculate how much of this region Surya already covers
+            covered_area = 0
+            for te in text_elements:
+                tb = te['bbox']
+                ix1 = max(rb[0], tb[0])
+                iy1 = max(rb[1], tb[1])
+                ix2 = min(rb[2], tb[2])
+                iy2 = min(rb[3], tb[3])
+                if ix2 > ix1 and iy2 > iy1:
+                    covered_area += (ix2 - ix1) * (iy2 - iy1)
+
+            coverage = covered_area / region_area
+            if coverage >= 0.50:
+                continue  # Well covered by Surya, skip
+
+            # Low coverage — crop and run TrOCR on the signature region
+            padded = pad_bbox(list(rb), 12, width, height)
+            crop = crop_image(image, padded)
+            hw_text, hw_conf = self.handwriting_recognizer.recognize(crop)
+
+            if hw_text and len(hw_text.strip()) > 0 and hw_conf >= 0.30:
+                corrected = self.spell_corrector.correct_text(
+                    normalize_punctuation_spacing(hw_text)
+                )
+                gap_element = {
+                    "type": "text",
+                    "content": corrected,
+                    "bbox": list(rb),
+                    "confidence": hw_conf,
+                    "source_model": "trocr",
+                    "gap_fill": True
+                }
+                text_elements.append(gap_element)
+                all_text_content.append(corrected)
+                print(f"  [GAP-FILL] TrOCR on signature region: '{corrected}' (conf: {hw_conf:.2f})")
+
         # Detect Language
         full_text = " ".join(all_text_content)
         page_content["language"] = self.detect_language(full_text)

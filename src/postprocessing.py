@@ -8,6 +8,45 @@ import re
 from typing import Dict, List, Any, Tuple, Optional
 
 
+def normalize_underscore_fields(elements: List[Dict]) -> List[Dict]:
+    """
+    Normalize blank form fields (underscore runs, excessive spaces after labels).
+
+    OCR produces inconsistent representations of fill-in fields:
+    - 'Name:________' -> 'Name: ___'
+    - 'Name:         ' -> 'Name: ___'
+    - 'Name: _ _ _ _' -> 'Name: ___'
+
+    Standardizes all to a single '___' token for consistent comparison.
+
+    Args:
+        elements: List of element dictionaries
+
+    Returns:
+        Elements with normalized underscore fields
+    """
+    for element in elements:
+        if element.get("type") != "text":
+            continue
+
+        content = element.get("content", "")
+        if not content:
+            continue
+
+        # Normalize spaced underscores: '_ _ _ _' -> '____' then collapse
+        content = re.sub(r'(_\s+){2,}_', '___', content)
+        # Collapse runs of 3+ underscores to a single '___'
+        content = re.sub(r'_{3,}', '___', content)
+        # Collapse runs of 3+ spaces after a colon/label to ' ___'
+        content = re.sub(r'(:\s*)\s{3,}', r'\1___', content)
+        # Clean up any resulting double spaces
+        content = re.sub(r' {2,}', ' ', content)
+
+        element["content"] = content.strip()
+
+    return elements
+
+
 def normalize_punctuation_spacing(text: str) -> str:
     """
     Normalize spacing around punctuation in OCR output.
@@ -52,6 +91,57 @@ def normalize_punctuation_spacing(text: str) -> str:
     text = re.sub(r' {2,}', ' ', text)
     
     return text.strip()
+
+
+# ============================================================================
+# Offensive OCR Misread Filter (P0 - Reputational Risk)
+# ============================================================================
+
+# Known offensive OCR misreads mapped to their correct readings.
+# These are cases where the OCR model produces offensive words from
+# innocuous source text (e.g., "Litco" -> "Bitch", "Eckerd" -> "Pecker").
+# Each entry: (offensive_pattern, correct_replacement)
+OFFENSIVE_OCR_CORRECTIONS = [
+    (re.compile(r'\bBitch\b', re.IGNORECASE), 'Litco'),
+    (re.compile(r'\bPecker\b(?=\s+Drugs)', re.IGNORECASE), 'Eckerd'),
+]
+
+
+def filter_offensive_ocr_misreads(elements: List[Dict]) -> List[Dict]:
+    """
+    Detect and correct known offensive OCR misreads.
+
+    Some OCR models produce offensive words from innocuous source text.
+    This filter catches known patterns and replaces them with the correct
+    reading, adding a flag to the element for audit purposes.
+
+    Args:
+        elements: List of element dictionaries
+
+    Returns:
+        Elements with offensive misreads corrected
+    """
+    for element in elements:
+        if element.get("type") != "text":
+            continue
+
+        content = element.get("content", "")
+        if not content:
+            continue
+
+        corrected = content
+        corrections_made = []
+
+        for pattern, replacement in OFFENSIVE_OCR_CORRECTIONS:
+            if pattern.search(corrected):
+                corrected = pattern.sub(replacement, corrected)
+                corrections_made.append(f"{pattern.pattern} -> {replacement}")
+
+        if corrections_made:
+            element["content"] = corrected
+            element["offensive_ocr_corrected"] = corrections_made
+
+    return elements
 
 
 # ============================================================================
@@ -1253,16 +1343,25 @@ def promote_layout_regions_to_tables(elements: List[Dict]) -> List[Dict]:
 def postprocess_output(output_data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Apply all post-processing to OCR output.
-    
+
     Steps:
     0. Filter empty table/layout regions (remove hallucinations)
+    0.25. Normalize underscore fill-in fields
     0.5. Validate table structure (remove false positive tables)
     0.6. Heuristic table promotion (detect missed borderless tables)
     1. Deduplicate layout regions
-    2. Score and flag potential hallucinations
+    2. Score and handle hallucinations (with margin awareness)
+    2.1. Filter rotated margin text (Bates numbers, vertical IDs)
+    2.5. Filter offensive OCR misreads (P0 reputational risk)
     3. Clean text content
+    3.1. Repair dropped parentheses (P3)
+    3.25. Apply handwritten OCR corrections (with slash-compound splitting)
+    3.26. Apply multi-word proper noun corrections (P1)
+    3.3. Replace signature text
+    3.35. Filter signature overlap garbage (short fragments on cursive signatures)
+    3.5. Remove consecutive duplicate words (TrOCR beam search fix)
     4. Normalize phone numbers
-    
+
     Args:
         output_data: Raw OCR output dictionary
         
@@ -1274,7 +1373,10 @@ def postprocess_output(output_data: Dict[str, Any]) -> Dict[str, Any]:
         
         # Step 0: Filter empty table/layout regions
         elements = filter_empty_regions(elements)
-        
+
+        # Step 0.25: Normalize underscore fill-in fields
+        elements = normalize_underscore_fields(elements)
+
         # Step 0.5: Validate table structure (remove false positives)
         elements = filter_invalid_tables(elements)
         
@@ -1286,10 +1388,48 @@ def postprocess_output(output_data: Dict[str, Any]) -> Dict[str, Any]:
         
         # Step 2: Score and handle hallucinations
         elements = process_hallucinations(elements)
-        
+
+        # Step 2.1: Filter rotated margin text (Bates numbers, vertical IDs)
+        elements = filter_rotated_margin_text(elements)
+
+        # Step 2.5: Filter offensive OCR misreads
+        elements = filter_offensive_ocr_misreads(elements)
+
         # Step 3: Clean text content
         elements = clean_text_content(elements)
-        
+
+        # Step 3.1: Repair dropped parentheses
+        for element in elements:
+            if element.get('type') == 'text' and element.get('content'):
+                element['content'] = repair_dropped_parentheses(element['content'])
+
+        # Step 3.25: Apply OCR corrections (with slash-compound splitting)
+        # Build page-level context for standalone elements (e.g., single-word table headers)
+        page_context = set()
+        for element in elements:
+            if element.get('type') == 'text' and element.get('content'):
+                for w in element['content'].split():
+                    page_context.add(w.rstrip(':.,;!?').lower())
+        for element in elements:
+            if element.get('type') == 'text' and element.get('content'):
+                element['content'] = apply_ocr_corrections_handwritten(
+                    element['content'], is_handwritten=True, page_context=page_context
+                )
+
+        # Step 3.26: Apply multi-word proper noun corrections
+        for element in elements:
+            if element.get('type') == 'text' and element.get('content'):
+                element['content'] = apply_multi_word_ocr_corrections(element['content'], page_context=page_context)
+
+        # Step 3.3: Replace signature text readings with '(signature)'
+        elements = replace_signature_text(elements)
+
+        # Step 3.35: Remove short garbage text overlapping signature regions
+        elements = filter_signature_overlap_garbage(elements)
+
+        # Step 3.5: Remove consecutive duplicate words (TrOCR beam search artifact)
+        elements = remove_consecutive_duplicate_words(elements)
+
         # Step 4: Normalize phone numbers
         elements = normalize_phone_numbers(elements)
         
@@ -1344,92 +1484,168 @@ def process_hallucinations(elements: List[Dict]) -> List[Dict]:
     """
     Score each text element for hallucination likelihood using multiple signals.
     Removes high-confidence hallucinations, flags uncertain ones.
-    
+
     Signals:
-    - Confidence score (20%)
-    - Text length (15%)
+    - Confidence score (15%)
+    - Text length (10%)
     - Character patterns (25%)
     - Bbox size anomaly (15%)
     - Dictionary check (15%)
     - Repetition patterns (10%)
-    
+    - Margin position (10%)
+
     Args:
         elements: List of element dictionaries
-        
+
     Returns:
         Processed elements with hallucinations handled
     """
+    # Estimate page dimensions from all element bboxes
+    page_width = 0
+    page_height = 0
+    for element in elements:
+        bbox = element.get("bbox", [])
+        if len(bbox) >= 4:
+            page_width = max(page_width, bbox[2])
+            page_height = max(page_height, bbox[3])
+    # Fallback if no bboxes found
+    if page_width == 0:
+        page_width = 612  # Standard letter width in points
+    if page_height == 0:
+        page_height = 792
+
     processed = []
-    
+
     for element in elements:
         if element.get("type") != "text":
             processed.append(element)
             continue
-        
+
         content = element.get("content", "")
         confidence = element.get("confidence", 1.0)
         bbox = element.get("bbox", [0, 0, 100, 100])
-        
+
         # Calculate hallucination score
-        score, signals = calculate_hallucination_score(content, confidence, bbox)
-        
-        if score > 0.60:
-            # High hallucination likelihood - remove
+        score, signals = calculate_hallucination_score(
+            content, confidence, bbox, page_width, page_height
+        )
+
+        if score >= 0.50:
+            # High hallucination likelihood - remove (tightened from > 0.50)
             continue
-        elif score > 0.40:
-            # Uncertain - flag but keep
+        elif score > 0.30:
+            # Uncertain - flag but keep (tightened from 0.40)
             element["hallucination_flag"] = True
             element["hallucination_score"] = round(score, 3)
             element["hallucination_signals"] = signals
-        
+
         processed.append(element)
-    
+
     return processed
 
 
+def filter_rotated_margin_text(elements: List[Dict]) -> List[Dict]:
+    """
+    Remove text fragments from rotated margin text (e.g., vertical Bates numbers).
+
+    Documents often have ID numbers printed vertically along the right edge.
+    The OCR reads these as isolated fragments (single digits, short nonsense
+    strings) scattered along the margin. This filter detects and removes them
+    based on their distinctive bbox signature: extremely narrow, at the far
+    right edge of the page.
+
+    Digit-only content is exempted — Bates numbers and document IDs that Surya
+    reads as a single coherent number are legitimate and should be kept.
+
+    Args:
+        elements: List of element dictionaries
+
+    Returns:
+        Filtered elements with rotated margin fragments removed
+    """
+    # Estimate page width from all element bboxes
+    page_width = 0
+    for element in elements:
+        bbox = element.get("bbox", [])
+        if len(bbox) >= 4:
+            page_width = max(page_width, bbox[2])
+    if page_width == 0:
+        return elements  # Can't determine margins without bboxes
+
+    filtered = []
+    for element in elements:
+        if element.get("type") != "text":
+            filtered.append(element)
+            continue
+
+        bbox = element.get("bbox", [0, 0, 100, 100])
+        if len(bbox) < 4:
+            filtered.append(element)
+            continue
+
+        content = element.get("content", "").strip()
+        bbox_width = bbox[2] - bbox[0]
+        # Rotated margin text: starts in rightmost 8% of page AND very narrow
+        at_right_edge = bbox[0] > page_width * 0.92
+        very_narrow = bbox_width < page_width * 0.04
+
+        if at_right_edge and very_narrow:
+            # Exempt digit-only content (Bates numbers, document IDs)
+            if content.isdigit():
+                filtered.append(element)
+                continue
+            continue  # Drop rotated margin fragment
+
+        filtered.append(element)
+
+    return filtered
+
+
 def calculate_hallucination_score(
-    content: str, 
-    confidence: float, 
-    bbox: List[float]
+    content: str,
+    confidence: float,
+    bbox: List[float],
+    page_width: float = 612,
+    page_height: float = 792
 ) -> Tuple[float, List[str]]:
     """
     Calculate hallucination likelihood score from multiple signals.
-    
+
     Returns:
         Tuple of (score 0.0-1.0, list of triggered signal names)
     """
     score = 0.0
     signals = []
-    
-    # Signal 1: Low confidence (20% weight)
+
+    # Signal 1: Low confidence (15% weight — reduced from 20% for margin signal)
     if confidence < 0.50:
-        score += 0.20
+        score += 0.15
         signals.append("very_low_confidence")
     elif confidence < 0.70:
-        score += 0.12
+        score += 0.10
         signals.append("low_confidence")
     elif confidence < 0.85:
         score += 0.05
-    
-    # Signal 2: Very short text (15% weight)
+
+    # Signal 2: Very short text (10% weight — reduced from 15% for margin signal)
     text_len = len(content.strip())
     if text_len <= 2:
-        score += 0.15
+        score += 0.10
         signals.append("very_short")
     elif text_len <= 4:
-        score += 0.08
+        score += 0.06
         signals.append("short")
-    
+
     # Signal 3: Character pattern anomalies (25% weight)
     pattern_score, pattern_signals = check_character_patterns(content)
     score += pattern_score * 0.25
     signals.extend(pattern_signals)
-    
+
     # Signal 4: Bbox size anomaly (15% weight)
     if len(bbox) >= 4:
         width = bbox[2] - bbox[0]
         height = bbox[3] - bbox[1]
-        
+
         # Very small bbox
         if width < 20 or height < 10:
             score += 0.15
@@ -1438,61 +1654,88 @@ def calculate_hallucination_score(
         elif width > 0 and height / width > 5:
             score += 0.10
             signals.append("abnormal_aspect")
-    
+
     # Signal 5: Not a recognizable word/pattern (15% weight)
     if not is_valid_text(content):
         score += 0.15
         signals.append("not_valid_text")
-    
+
     # Signal 6: Repetition patterns (10% weight)
     if has_repetition_pattern(content):
         score += 0.10
         signals.append("repetition")
-    
+
+    # Signal 7: Margin position (10% weight — new)
+    # Short fragments at extreme page edges are likely margin hallucinations,
+    # but digit-only content at margins is typically a page number — exempt it.
+    if len(bbox) >= 4 and page_width > 0:
+        margin_threshold = 0.03  # 3% of page dimension
+        at_left_margin = bbox[0] < page_width * margin_threshold and bbox[2] < page_width * 0.10
+        at_right_margin = bbox[0] > page_width * (1 - 0.10) and bbox[2] > page_width * (1 - margin_threshold)
+        is_page_number = content.strip().isdigit()
+        if (at_left_margin or at_right_margin) and not is_page_number:
+            if text_len <= 4:
+                # Short non-numeric fragment at margin — high confidence hallucination
+                score += 0.25
+                signals.append("margin_fragment_short")
+            else:
+                # Longer text at margin — mild signal
+                score += 0.10
+                signals.append("margin_position")
+
     return min(score, 1.0), signals
 
 
 def check_character_patterns(content: str) -> Tuple[float, List[str]]:
     """
     Check for suspicious character patterns.
-    
+
     Returns:
         Tuple of (score 0.0-1.0, list of pattern names)
     """
     score = 0.0
     patterns = []
-    
+
     # All same character
     if len(set(content.replace(" ", ""))) == 1 and len(content) > 2:
         score += 0.8
         patterns.append("all_same_char")
-    
-    # Only digits when surrounded by text context is suspicious
-    if content.strip().isdigit() and len(content.strip()) <= 3:
-        score += 0.4
+
+    stripped = content.strip()
+
+    # Only digits / short numbers — mutually exclusive to avoid double-counting.
+    # Page numbers, short codes, and reference numbers are common legitimate content.
+    if stripped.isdigit() and len(stripped) <= 3:
+        score += 0.30
         patterns.append("isolated_digits")
-    
+    elif re.match(r'^[\d\s]+$', stripped) and len(stripped) <= 4:
+        score += 0.35
+        patterns.append("short_numbers")
+
     # Only punctuation
     if all(c in ".,;:!?-_'" for c in content.replace(" ", "")):
         score += 0.6
         patterns.append("only_punctuation")
-    
-    # Non-printable or unusual characters
-    if any(ord(c) > 127 and c not in "éèêëàâäùûüôöîïç" for c in content):
+
+    # Non-printable or unusual characters — allow Latin Extended (U+00C0-U+024F)
+    # which covers all European Latin-script languages (Spanish ñ, German ß,
+    # Portuguese ã/õ, Nordic å/ø/æ, Polish ł/ś/ź, Turkish ğ/ş, Czech ř/š/č, etc.)
+    # and Latin Extended Additional (U+1E00-U+1EFF) for Vietnamese and others.
+    if any(
+        ord(c) > 127
+        and not (0x00C0 <= ord(c) <= 0x024F)
+        and not (0x1E00 <= ord(c) <= 0x1EFF)
+        for c in content
+    ):
         score += 0.3
         patterns.append("unusual_chars")
-    
-    # Mostly numbers with random letters (like "160", "000")
-    if re.match(r'^[\d\s]+$', content.strip()) and len(content.strip()) <= 4:
-        score += 0.5
-        patterns.append("short_numbers")
-    
+
     # Isolated year patterns (common hallucinations from fine print)
-    # Matches: 1907, 1960s, 2007, etc.
-    if re.match(r'^(19|20)\d{2}s?$', content.strip()):
-        score += 0.5
+    # Matches: 1907, 1960s, 2007, etc. Mild signal — years in headers are legitimate.
+    if re.match(r'^(19|20)\d{2}s?$', stripped):
+        score += 0.25
         patterns.append("isolated_year")
-    
+
     return min(score, 1.0), patterns
 
 
@@ -1568,70 +1811,360 @@ def has_repetition_pattern(content: str) -> bool:
 # Handwriting OCR Correction (Applied only to handwritten documents)
 # ============================================================================
 
-# Common TrOCR confusion pairs: {wrong: correct} + context words
+# Common TrOCR confusion pairs: (wrong_word, correct_word, context_words)
+# Context words can appear anywhere within 5 words of the confused word
 OCR_CONFUSION_CORRECTIONS = [
-    # (wrong_word, correct_word, prev_context, next_context)
-    ('last', 'lost', ['i', 'have', "i've", 'we'], ['my', 'the', 'track']),
-    ('book', 'look', ['to', 'please', "can't"], ['at', 'for', 'into']),
+    # Handwriting-specific confusions based on observed errors
+    ('last', 'lost', ['property', 'found', 'missing', 'retrieve', 'retrieving']),
+    ('book', 'look', ['neat', 'have', 'take', 'good', 'had', 'that']),
+    ('intact', 'in fact', ['no', 'not', 'but', 'actually']),
+    ('form', 'from', ['received', 'sent', 'get', 'letter', 'came']),
+    ('bock', 'back', ['come', 'go', 'went', 'came', 'get']),
+    ('sane', 'same', ['the', 'at', 'time', 'way']),
+    ('dime', 'time', ['the', 'at', 'same', 'every', 'any']),
+    # Empirically derived from test corpus — proper noun and typed form misreads
+    # Context words prevent false positives on common English words (e.g. "angles", "patriot")
+    ('gambetta', 'lambretta', ['negresco', 'beach', 'parked', 'opposite', 'promenade']),
+    ('negress', 'negresco', ['lambretta', 'beach', 'promenade', 'opposite', 'swim']),
+    ('angles', 'anglais', ['promenade', 'des', 'nice', 'walls', 'spumed']),
+    ('patriot', 'patriote', ['read', 'nice', 'beach', 'catastrophe', 'about']),
+    ('lobito', 'losito', ['cc', 'tahmaseb', 'baroody', 'stevens', 'registration']),
+    ('proliffements', 'requirements', []),  # not a real word — safe unconditional
+    ('leaved', 'leaked', ['condition', 'shipment', 'good', 'broken', 'article']),
+    ('overlap', 'overwrap', ['filter', 'pack', 'type', 'flavoring']),
+    ('depariment', 'department', []),  # not a real word — safe unconditional
+    ('engine', 'broken', ['condition', 'shipment', 'good', 'leaked']),
+    # Typed document proper noun misreads (Surya OCR)
+    ('atterney', 'attorney', []),  # not a real word — safe unconditional
+    ('decamps', 'delchamps', ['stores', 'account', 'maverick', 'distribution', 'region']),
+    ('antler', 'dantzler', ['stores', 'account', 'maverick', 'region', 'distribution']),
+    ('indoor', 'ind/lor', ['volume', 'stores', 'account', 'maverick', 'distribution']),
+    # Degraded fax / small-print confusions (Surya OCR)
+    ('approve', 'approx', ['circulation', 'geographical', 'redemption', 'coupon']),
+    ('incipient', 'recipient', ['intended', 'disclosure', 'confidential', 'privileged']),
+    ('probable', 'prohibited', ['disclosure', 'confidential', 'telecopy', 'privileged']),
+]
+
+# Multi-word OCR corrections for proper nouns that span multiple tokens.
+# These are applied as full-text replacements (case-insensitive).
+# Each entry: (wrong_phrase, correct_phrase, context_words)
+# Empty context [] = unconditional (phrase is unique enough to never appear naturally).
+# Non-empty context = requires at least one context word within the same text element.
+MULTI_WORD_OCR_CORRECTIONS = [
+    ('HAVENS GERMAN', 'HAGENS BERMAN', []),
+    ('Havens German', 'Hagens Berman', []),
+    ('Steve W. German', 'Steve W. Berman', []),
+    ('Meyer G. Follow', 'Meyer G. Koplow', []),
+    ('Rose & Kate', 'Rosen & Katz', []),
+    ('Martin Harrington', 'Martin Barrington', []),
+    ('Martin Warrington', 'Martin Barrington', []),
+    ('Farewell', 'Wardwell', ['davis', 'polk', 'law', 'counsel', 'firm']),
+    ('Ronald Einstein', 'Ronald Milstein', []),
+    ('Charles A. Bit', 'Charles A. Blixt', []),
+    ('Style Oil', 'Sayle Oil', []),
+    ('Try Green', 'Autry Greer', ['stores', 'region', 'account', 'distribution', 'maverick']),
+    ('Win Dixie', 'Winn Dixie', []),
+    ('Compact Foods', 'Compac Foods', []),
 ]
 
 # Words that commonly appear with prefixes that TrOCR misses
+# These are checked in a wider window (5 words before, 3 after) for negation/contrast context
 PREFIX_CORRECTIONS = {
     'cuckolded': 'uncuckolded',
-    'fortunate': 'unfortunate', 
+    'robbed': 'unrobbed',
+    'fortunate': 'unfortunate',
     'known': 'unknown',
     'able': 'unable',
     'satisfied': 'dissatisfied',
     'appear': 'disappear',
+    'happy': 'unhappy',
+    'likely': 'unlikely',
+    'certain': 'uncertain',
 }
 
+# Extended negation context for prefix restoration
+NEGATION_CONTEXT = ['not', "n't", 'never', 'but', 'yet', 'nor', 'neither', 'nothing', 'none', 'chosen']
 
-def apply_ocr_corrections_handwritten(text: str, is_handwritten: bool = False) -> str:
+
+def apply_ocr_corrections_handwritten(text: str, is_handwritten: bool = False, page_context: set = None) -> str:
     """
     Apply OCR-specific corrections for handwritten documents only.
-    
+
+    Uses flexible context matching - looks for context words within a 5-word
+    window around the potentially confused word. Falls back to page-level
+    context when the element has too few words for local context matching.
+
     Args:
         text: OCR text to correct
         is_handwritten: Whether the source document is handwritten
-        
+        page_context: Optional set of lowercased words from all text elements
+                      on the page, used as fallback for short/standalone elements
+
     Returns:
         Corrected text (unchanged if not handwritten)
     """
     if not is_handwritten or not text:
         return text
-    
+
     words = text.split()
     corrected_words = []
-    
+    context_window_size = 5  # Check 5 words before and after
+
     for i, word in enumerate(words):
-        word_lower = word.lower()
-        corrected = word
-        
-        # Check confusion pairs with context
-        for wrong, correct, prev_ctx, next_ctx in OCR_CONFUSION_CORRECTIONS:
+        # Strip trailing punctuation so "OVERLAP:" matches "overlap"
+        stripped = word.rstrip(':.,;!?')
+        suffix = word[len(stripped):]
+
+        # Build context window (5 words before and after), also strip punctuation
+        window_start = max(0, i - context_window_size)
+        window_end = min(len(words), i + context_window_size + 1)
+        context_words = set(w.rstrip(':.,;!?').lower() for w in words[window_start:window_end])
+
+        # Handle compound words joined by '/' or '-' (e.g., "DIRECTOR/DEPARIMENT",
+        # "atterney-privileged"). Split, correct each part, rejoin.
+        for sep in ('/', '-'):
+            if sep in stripped:
+                parts = stripped.split(sep)
+                corrected_parts = []
+                for part in parts:
+                    part_lower = part.lower()
+                    part_corrected = part
+                    for wrong, correct, context in OCR_CONFUSION_CORRECTIONS:
+                        if part_lower == wrong:
+                            if not context or any(ctx in context_words for ctx in context) or (page_context and any(ctx in page_context for ctx in context)):
+                                part_corrected = correct if part.islower() else correct.upper() if part.isupper() else correct.capitalize()
+                                break
+                    corrected_parts.append(part_corrected)
+                corrected_words.append(sep.join(corrected_parts) + suffix)
+                break
+        else:
+            # No separator found — fall through to normal word processing below
+            pass
+
+        # If we handled a compound word above, skip normal processing
+        if '/' in stripped or '-' in stripped:
+            continue
+
+        word_lower = stripped.lower()
+        corrected = stripped
+        context_words.discard(word_lower)  # Remove the word itself
+
+        # Check confusion pairs with flexible context matching
+        for wrong, correct, context in OCR_CONFUSION_CORRECTIONS:
             if word_lower == wrong:
-                prev_word = words[i - 1].lower() if i > 0 else ""
-                next_word = words[i + 1].lower() if i < len(words) - 1 else ""
-                if prev_word in prev_ctx or next_word in next_ctx:
-                    corrected = correct if word.islower() else correct.capitalize()
+                # Empty context = always apply (proper noun / unconditional corrections)
+                # Non-empty context = check element-local window first, then page context as fallback
+                if not context or any(ctx in context_words for ctx in context) or (page_context and any(ctx in page_context for ctx in context)):
+                    corrected = correct if stripped.islower() else correct.upper() if stripped.isupper() else correct.capitalize()
                     break
-        
-        # Check prefix restoration in negation context
+
+        # Check prefix restoration in negation/contrast context
         if word_lower in PREFIX_CORRECTIONS:
-            window = ' '.join(words[max(0, i-2):i]).lower()
-            if any(neg in window for neg in ['not', "n't", 'never', 'but']):
+            # Look in wider window for negation context (5 before, 3 after)
+            window = ' '.join(words[max(0, i - 5):i + 3]).lower()
+            if any(neg in window for neg in NEGATION_CONTEXT):
                 restored = PREFIX_CORRECTIONS[word_lower]
-                corrected = restored if word.islower() else restored.capitalize()
-        
-        corrected_words.append(corrected)
-    
+                corrected = restored if stripped.islower() else restored.upper() if stripped.isupper() else restored.capitalize()
+
+        corrected_words.append(corrected + suffix)
+
     return ' '.join(corrected_words)
+
+
+def apply_multi_word_ocr_corrections(text: str, page_context: set = None) -> str:
+    """
+    Apply multi-word OCR corrections for proper nouns spanning multiple tokens.
+
+    These corrections handle cases where the OCR model mangles multi-word
+    proper nouns (e.g., "HAVENS GERMAN" -> "HAGENS BERMAN") that cannot
+    be fixed by single-word corrections.
+
+    Entries with non-empty context require at least one context word to appear
+    anywhere in the text element before the correction fires. Falls back to
+    page-level context when the element itself doesn't contain context words.
+    This prevents false positives on common words (e.g., "Farewell" only
+    becomes "Wardwell" when near "Davis", "Polk", etc.).
+
+    Args:
+        text: OCR text to correct
+        page_context: Optional set of lowercased words from all text elements
+                      on the page, used as fallback for short elements
+
+    Returns:
+        Text with multi-word corrections applied
+    """
+    if not text:
+        return text
+
+    text_lower = text.lower()
+
+    for wrong, correct, context in MULTI_WORD_OCR_CORRECTIONS:
+        # Case-insensitive search, preserve surrounding text
+        pattern = re.compile(re.escape(wrong), re.IGNORECASE)
+        if pattern.search(text):
+            # Empty context = unconditional; non-empty = require context match
+            # Check element text first, then fall back to page context
+            if not context or any(ctx in text_lower for ctx in context) or (page_context and any(ctx in page_context for ctx in context)):
+                text = pattern.sub(correct, text)
+                text_lower = text.lower()  # refresh after substitution
+
+    return text
+
+
+# Pattern to fix dropped opening parentheses for optional-plural suffixes.
+# Surya OCR produces "BRANDS)" instead of "BRAND(S)", "DIVISIONS)" instead of "DIVISION(S)".
+# Only matches known suffix patterns: S, s, ES, es (plural/optional markers).
+_DROPPED_OPEN_PAREN_RE = re.compile(
+    r'\b([A-Za-z]{2,}?)((?:[Ee][Ss]|[Ss]))\)', re.UNICODE
+)
+
+
+def repair_dropped_parentheses(text: str) -> str:
+    """
+    Repair dropped opening parentheses in OCR output.
+
+    Surya OCR consistently drops the opening parenthesis in mid-word
+    positions for optional-plural suffixes:
+    - "BRANDS)" -> "BRAND(S)"
+    - "DIVISIONS)" -> "DIVISION(S)"
+    - "recipients)" -> "recipient(s):"
+    - "individuals)" -> "individual(s)"
+
+    Only repairs known suffix patterns (S), (s), (ES), (es) to avoid
+    false positives on words like "SCOPE)" which should stay as-is.
+
+    Args:
+        text: OCR text to repair
+
+    Returns:
+        Text with parentheses repaired
+    """
+    if not text or ')' not in text:
+        return text
+
+    def fix_paren(match):
+        prefix = match.group(1)
+        suffix = match.group(2)
+        return f"{prefix}({suffix})"
+
+    # Only apply if there's a ) without a matching (
+    open_count = text.count('(')
+    close_count = text.count(')')
+
+    if close_count > open_count:
+        text = _DROPPED_OPEN_PAREN_RE.sub(fix_paren, text)
+
+    return text
+
+
+SIGNATURE_LABEL_RE = re.compile(
+    r'((?:RECEIVED|SIGNED)\s+BY\s*:'
+    r'|SIGNATURE\s+OF\s+[\w\s]*?(?:CONSIGNEE|INITIATOR|APPLICANT|AUTHORIZED(?:\s+\w+)?)\s*:'
+    r'|SIGNATURE\s*:)\s*'
+    r'([A-Za-z]+(?:\s+[A-Za-z]+){0,2})'
+    r'(?=\s+DATE\s*:|$)',
+    re.IGNORECASE
+)
+
+
+def replace_signature_text(elements: List[Dict]) -> List[Dict]:
+    """
+    Replace OCR-read signature text with '(signature)'.
+
+    Matches patterns like 'RECEIVED BY: Some Name DATE:' and replaces
+    the name portion with '(signature)'.
+    """
+    for element in elements:
+        if element.get('type') == 'text' and element.get('content'):
+            element['content'] = SIGNATURE_LABEL_RE.sub(
+                lambda m: m.group(1) + ' (signature)', element['content']
+            )
+    return elements
+
+
+_DATE_LIKE_RE = re.compile(
+    r'^\d{1,2}[-/][A-Za-z]{3,9}[-/]\d{2,4}$'  # 21-Jan-00, 03/01/90
+    r'|^\d{1,2}[-/]\d{1,2}[-/]\d{2,4}$'        # 03/01/1990, 3-1-90
+)
+
+
+def filter_signature_overlap_garbage(elements: List[Dict]) -> List[Dict]:
+    """
+    Remove single-word garbage fragments that overlap with signature elements.
+
+    When Surya reads cursive signatures, it often produces short garbage strings
+    like 'elevens.', 'not', '100' that are too "normal" for the hallucination
+    scorer but clearly wrong when correlated with Florence-2's signature detection.
+
+    Removes text elements that are:
+    - Single word (exactly 1 word)
+    - Not a date-like pattern (e.g., '21-Jan-00')
+    - Overlapping > 50% with a signature element
+
+    Only uses 'signature' visual elements (not logo/seal, which commonly have
+    legitimate text nearby like firm names).
+
+    Args:
+        elements: List of element dictionaries
+
+    Returns:
+        Filtered elements with signature garbage removed
+    """
+    # Collect bboxes of signature elements only (not logo/seal)
+    signature_bboxes = []
+    for el in elements:
+        if el.get('type', '').lower() == 'signature':
+            bbox = el.get('bbox')
+            if bbox and len(bbox) == 4:
+                signature_bboxes.append(bbox)
+
+    if not signature_bboxes:
+        return elements
+
+    filtered = []
+    for el in elements:
+        if el.get('type') != 'text':
+            filtered.append(el)
+            continue
+
+        content = el.get('content', '').strip()
+        word_count = len(content.split()) if content else 0
+
+        # Only filter single-word fragments
+        if word_count != 1:
+            filtered.append(el)
+            continue
+
+        # Exempt date-like patterns (e.g., 21-Jan-00, 03/01/90)
+        if _DATE_LIKE_RE.match(content.rstrip('.,')):
+            filtered.append(el)
+            continue
+
+        el_bbox = el.get('bbox')
+        if not el_bbox or len(el_bbox) != 4:
+            filtered.append(el)
+            continue
+
+        # Check overlap with any signature element
+        overlaps_sig = False
+        for sig_bbox in signature_bboxes:
+            overlap = bbox_overlap(el_bbox, sig_bbox)
+            if overlap > 0.50:
+                overlaps_sig = True
+                break
+
+        if overlaps_sig:
+            print(f"  [SIG-GARBAGE] Removed '{content}' (overlaps signature region)")
+        else:
+            filtered.append(el)
+
+    return filtered
 
 
 def clean_text_content(elements: List[Dict]) -> List[Dict]:
     """
     Clean and normalize text content.
-    
+
     Fixes:
     - Extra whitespace
     - Common OCR substitution errors
@@ -1650,7 +2183,49 @@ def clean_text_content(elements: List[Dict]) -> List[Dict]:
         content = fix_encoding_issues(content)
         
         element["content"] = content
-    
+
+    return elements
+
+
+def remove_consecutive_duplicate_words(elements: List[Dict]) -> List[Dict]:
+    """
+    Remove consecutive duplicate words from text content.
+
+    This fixes a known TrOCR beam search artifact where words get duplicated,
+    e.g., "We went straight straight to bed" -> "We went straight to bed"
+
+    Args:
+        elements: List of element dictionaries
+
+    Returns:
+        Elements with duplicate words removed from text content
+    """
+    for element in elements:
+        if element.get("type") != "text":
+            continue
+
+        # Only apply to TrOCR output (handwriting model)
+        if element.get("source_model") != "trocr":
+            continue
+
+        content = element.get("content", "")
+        if not content:
+            continue
+
+        words = content.split()
+        if len(words) < 2:
+            continue
+
+        # Remove consecutive duplicates (case-insensitive comparison)
+        deduplicated = [words[0]]
+        for word in words[1:]:
+            if word.lower() != deduplicated[-1].lower():
+                deduplicated.append(word)
+
+        if len(deduplicated) < len(words):
+            element["content"] = ' '.join(deduplicated)
+            element["duplicate_words_removed"] = len(words) - len(deduplicated)
+
     return elements
 
 

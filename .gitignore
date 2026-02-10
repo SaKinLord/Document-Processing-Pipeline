@@ -7,6 +7,8 @@ log.txt
 .vscode/
 ground_truth.json
 validate_accuracy.py
+.claude/
+CLAUDE.md
 
 # Analysis artifacts (generated, not needed in repo)
 ground_truth_revised.json

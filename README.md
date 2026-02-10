@@ -40,21 +40,22 @@ A state-of-the-art local pipeline for extracting structured data from complex, m
 
 Based on regression testing with 12 ground truth documents (Feb 2026):
 
-| Document Type | Count | WER | CER | Best For |
+| Document Type | Count | WER (Strict) | CER (Strict) | Best For |
 | :--- | :--- | :--- | :--- | :--- |
-| **Typed / Structured** | 7 | **0.0%** | **0.0%** | Forms, Invoices, Technical Specs, Faxes |
-| **Handwritten** | 5 | **1.6-16.4%** | **1.7-5.3%** | Letters, Notes, Cursive Annotations |
-| **Mixed** | 1 | **6.4%** | **2.5%** | Forms with handwritten fill-ins |
+| **Typed / Structured** | 7 | **9.3–67.2%** | **4.8–61.0%** | Forms, Invoices, Technical Specs, Faxes |
+| **Handwritten** | 4 | **4.7–11.3%** | **16.4–19.5%** | Letters, Notes, Cursive Annotations |
+| **Mixed** | 1 | **65.2%** | **19.8%** | Forms with handwritten fill-ins |
 
 ### Performance Metrics
 
-| Metric | Value |
-|--------|-------|
-| Regression Tests | **12/12 passing** |
-| Average WER | **3.4%** |
-| Average CER | **1.8%** |
-| Processing Time (15 docs) | ~450 seconds |
-| Classification Accuracy | **100%** (0 misclassifications) |
+| Metric | Strict | Flexible (punct-insensitive) |
+|--------|--------|------------------------------|
+| Regression Tests | **5/12 passing** | — |
+| Average WER | **25.0%** | **10.7%** |
+| Average CER | **23.0%** | **5.4%** |
+| Error Breakdown | — | 154 formatting, 174 content |
+
+Flexible evaluation (`tests/flexible_evaluation.py`) ignores punctuation and formatting differences, which accounts for much of the gap between strict and flexible metrics.
 
 ## 🛠️ Architecture
 
