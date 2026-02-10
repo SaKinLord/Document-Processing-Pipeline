@@ -1,191 +1,188 @@
 # Document Processing Pipeline (Hybrid Intelligent System)
 
-A state-of-the-art local pipeline for extracting structured data from complex, multi-format documents. It uses a **Hybrid Architecture** that dynamically switches between specialized models based on document content (Typed, Handwritten, or Mixed), ensuring high fidelity for technical forms while maintaining readability for cursive notes.
+A local pipeline for extracting structured data from complex, multi-format documents. It uses a **Hybrid Architecture** that dynamically switches between specialized models based on document content (Typed, Handwritten, or Mixed), with **per-line handwriting routing** that detects and re-routes individual handwritten lines on otherwise typed pages.
 
-## 🚀 Key Features
+## Key Features
 
-*   **Intelligent 8-Feature Classification:** Automatically detects document type using:
-    *   Stroke width variance
-    *   Line regularity (horizontal alignment)
-    *   Contour angle variance (with handwriting penalty for high variance)
-    *   Edge density
-    *   **Form structure detection** (horizontal/vertical lines)
-    *   **Character uniformity**
-    *   **Signature region isolation** (bottom 20% of page)
-    *   **Fax/letterhead header detection** (top 15%)
-    *   **Ruled paper handwriting detection** (biases lined paper toward handwritten)
-*   **Three-Way Routing:** Documents classified as `typed`, `handwritten`, or `mixed` (ensemble OCR)
-    *   Thresholds: typed ≥ 0.65, handwritten ≤ 0.45, else mixed
+*   **Intelligent 8-Feature Classification:** Automatically detects document type using stroke width variance, line regularity, contour angle variance, edge density, form structure detection, character uniformity, signature region isolation, and fax/letterhead header detection. Includes ruled paper handwriting detection and sparse form safeguards.
+*   **Per-Line Handwriting Routing:** Florence-2 phrase grounding detects signature and handwritten text regions before OCR. Lines overlapping these regions are routed to TrOCR ensemble regardless of page-level classification, catching handwritten fill-ins, names, and annotations on typed forms.
+*   **TrOCR Gap-Fill:** Signature regions with low Surya coverage (<50%) are cropped and sent directly to TrOCR, recovering cursive signatures that Surya's line detector misses entirely.
 *   **Multi-Model Intelligence:**
-    *   **Surya OCR (SegFormer):** High-precision text detection and recognition for typed documents.
-    *   **TrOCR (Transformer OCR):** Specialized attention-based recognition for handwritten lines with:
-        *   Beam search decoding (num_beams=4) for improved accuracy
-        *   12px bounding box padding to preserve descenders (g, y, p, q)
-        *   Punctuation spacing normalization
-    *   **Table Transformer (DETR):** Accurately detects tables and extracts structural bounding boxes.
-    *   **LayoutLMv3:** Understands document layout (Headers, Titles, Figures) for semantic segmentation.
-    *   **Florence-2 (VLM):** Vision-Language Model for captioning figures and detecting logos/signatures.
-*   **Multi-Signal Post-Processing:**
-    *   Hallucination detection using 6 weighted signals
-    *   Layout region deduplication
-    *   Text content cleaning
-    *   **Empty region filtering** (removes hallucinated tables/regions)
-    *   **Structural validation filter** (removes false positive tables)
-    *   **Heuristic table promotion** (detects borderless tables missed by the model)
-    *   **Phone number normalization** (extracts & standardizes phone numbers)
-    *   **Punctuation spacing normalization** (fixes TrOCR's extra spaces around punctuation)
-*   **Robust Pre-processing:** Adaptive denoising using OpenCV to clean scanned artifacts.
+    *   **Surya OCR:** High-precision text detection and recognition for typed documents
+    *   **TrOCR:** Specialized handwriting recognition with beam search (4 beams), 12px bbox padding for descenders, and punctuation spacing normalization
+    *   **Table Transformer (DETR):** Table detection and structural extraction with validation scoring
+    *   **LayoutLMv3:** Document layout semantic segmentation (headers, titles, figures)
+    *   **Florence-2 (VLM):** Vision-language model for object detection, captioning, and phrase grounding (signatures, handwriting, logos, seals)
+*   **Multi-Stage Post-Processing:**
+    *   7-signal hallucination detection and removal
+    *   Offensive OCR misread filter with audit trail
+    *   Context-aware OCR corrections (single-word and multi-word)
+    *   Parenthesis repair for Surya artifacts
+    *   Slash/hyphen compound word splitting before corrections
+    *   Signature text replacement and garbage filtering
+    *   Structural table validation and heuristic borderless table promotion
+    *   Phone number normalization and date validation
+    *   Domain-specific spell correction
+    *   Rotated margin text filtering (vertical Bates numbers)
+*   **Robust Pre-processing:** Adaptive denoising and deskewing via OpenCV with resolution-adaptive parameters
 
-## 📊 Accuracy & Performance
+## Accuracy & Performance
 
-Based on regression testing with 12 ground truth documents (Feb 2026):
+Based on regression testing with 15 ground truth documents (5 handwritten, 10 typed):
 
-| Document Type | Count | WER (Strict) | CER (Strict) | Best For |
-| :--- | :--- | :--- | :--- | :--- |
-| **Typed / Structured** | 7 | **9.3–67.2%** | **4.8–61.0%** | Forms, Invoices, Technical Specs, Faxes |
-| **Handwritten** | 4 | **4.7–11.3%** | **16.4–19.5%** | Letters, Notes, Cursive Annotations |
-| **Mixed** | 1 | **65.2%** | **19.8%** | Forms with handwritten fill-ins |
+| Metric | Value |
+|--------|-------|
+| Regression Tests | **15/15 passing** |
+| Average Flex WER | **~8.5%** |
+| Average Flex CER | **~5.7%** |
 
-### Performance Metrics
+Flexible evaluation ignores punctuation and formatting differences. Pass/fail is determined by flex CER.
 
-| Metric | Strict | Flexible (punct-insensitive) |
-|--------|--------|------------------------------|
-| Regression Tests | **5/12 passing** | — |
-| Average WER | **25.0%** | **10.7%** |
-| Average CER | **23.0%** | **5.4%** |
-| Error Breakdown | — | 154 formatting, 174 content |
+**Per-document thresholds:**
 
-Flexible evaluation (`tests/flexible_evaluation.py`) ignores punctuation and formatting differences, which accounts for much of the gap between strict and flexible metrics.
+| Document Type | Max WER | Max CER |
+|---------------|---------|---------|
+| Handwritten | 20% | 10% |
+| Typed | 40% | 30% |
+| Mixed | 40% | 20% |
 
-## 🛠️ Architecture
-
-The pipeline follows a sequential flow with intelligent branching:
+## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                         INGESTION                                │
-│                    Load Image/PDF                                │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                      PRE-PROCESSING                              │
-│              Denoise + Resize + Grayscale                        │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                 8-FEATURE CLASSIFIER                             │
-│  Stroke Variance │ Line Regularity │ Angle Variance (weighted)   │
-│  Edge Density    │ Form Structure  │ Character Uniformity        │
-│  Signature Isolation (bottom 20%) │ Fax Header Detection (top 15%)│
-│            Ruled Paper Handwriting Detection                     │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-            ┌─────────────────┼─────────────────┐
-            ▼                 ▼                 ▼
-      ┌──────────┐      ┌──────────┐      ┌──────────┐
-      │  TYPED   │      │  MIXED   │      │HANDWRITTEN│
-      │ (≥0.65)  │      │(0.45-0.65)│     │ (≤0.45)  │
-      └────┬─────┘      └────┬─────┘      └────┬─────┘
-           │                 │                  │
-           ▼                 ▼                  ▼
-      ┌─────────┐      ┌───────────┐      ┌─────────┐
-      │  Surya  │      │ Ensemble  │      │  TrOCR  │
-      │   OCR   │      │Surya+TrOCR│      │ +padding│
-      └────┬────┘      └─────┬─────┘      └────┬────┘
-           │                 │                  │
-           └─────────────────┼──────────────────┘
-                             ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                     LAYOUT ANALYSIS                              │
-│           LayoutLMv3 + Table Transformer + Florence-2            │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                    POST-PROCESSING                               │
-│  Empty Filter │ Table Validation │ Hallucination │ Punctuation   │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                       JSON OUTPUT                                │
-└─────────────────────────────────────────────────────────────────┘
+                          INGESTION
+                       Load Image/PDF
+                              |
+                              v
+                        PRE-PROCESSING
+                  Denoise + Deskew + Resize
+                              |
+                              v
+                     8-FEATURE CLASSIFIER
+    Stroke Variance | Line Regularity | Angle Variance
+    Edge Density | Form Structure | Character Uniformity
+    Signature Isolation | Fax Header | Ruled Paper Detection
+                              |
+                              v
+                  FLORENCE-2 PHRASE GROUNDING
+              Detect "signature" + "handwritten text"
+               regions BEFORE OCR (pixel bboxes)
+                              |
+            +-----------------+-----------------+
+            v                 v                 v
+       TYPED (>=0.65)   MIXED (0.45-0.65)  HANDWRITTEN (<=0.45)
+            |                 |                 |
+            v                 v                 v
+        Surya OCR        Ensemble           TrOCR
+                        Surya+TrOCR        + padding
+            |                 |                 |
+            +--------+--------+-----------------+
+                     |
+                     v  (per-line override)
+         Lines in Florence-2 handwritten regions
+           -> forced ensemble regardless of page type
+         Signature overlap -> 0.90 TrOCR gate
+         Handwriting overlap -> normal gate
+                     |
+                     v
+              TROCR GAP-FILL
+       Signature regions with <50% Surya coverage
+       -> crop & run TrOCR directly (conf >= 0.30)
+                     |
+                     v
+              LAYOUT ANALYSIS
+       LayoutLMv3 + Table Transformer + Florence-2 OD
+                     |
+                     v
+             POST-PROCESSING (17 stages)
+                     |
+                     v
+               JSON OUTPUT
 ```
+
+### Post-Processing Pipeline
+
+The post-processing pipeline in `postprocess_output()` applies 17 sequential stages:
+
+| # | Stage | Description |
+|---|-------|-------------|
+| 1 | Filter empty regions | Remove tables/layout regions with <30% text overlap |
+| 2 | Normalize underscores | Standardize form fields (`Name:____` -> `Name: ___`) |
+| 3 | Validate table structure | Score tables 0-100; remove if score < 50 |
+| 4 | Promote borderless tables | Detect missed tables via layout region clustering |
+| 5 | Deduplicate layout regions | Remove duplicate regions by bbox |
+| 6 | Score hallucinations | 7-signal scoring; remove >= 0.50, flag > 0.30 |
+| 7 | Filter rotated margin text | Remove vertical Bates numbers at page edges |
+| 8 | Filter offensive misreads | Regex-based reputational-risk corrections with audit trail |
+| 9 | Clean text content | Whitespace normalization, Unicode fixes |
+| 10 | Repair parentheses | Fix Surya's `BRANDS)` -> `BRAND(S)` pattern |
+| 11 | OCR corrections | Context-aware single-word fixes with slash/hyphen splitting |
+| 12 | Multi-word corrections | Proper noun phrase replacements (e.g., `HAVENS GERMAN` -> `HAGENS BERMAN`) |
+| 13 | Replace signature text | Pattern-matched signature labels -> `(signature)` |
+| 14 | Filter signature garbage | Remove single-word text overlapping >50% with signature bboxes |
+| 15 | Remove duplicate words | Fix TrOCR beam search artifacts (`straight straight` -> `straight`) |
+| 16 | Normalize phone numbers | Extract and format to `(XXX) XXX-XXXX` with type detection |
+| 17 | Classification refinement | Detect fax/form indicators in text to refine document type |
 
 ### Enhanced Document Classification
 
 The classifier uses 8 weighted signals to determine document type:
 
-| Signal | Contribution | Logic |
-|--------|-------------|-------|
-| Stroke Variance | +0.10 to +0.20 | Low variance = typed |
-| Line Regularity | +0.06 to +0.12 | High regularity = typed |
+| Signal | Max Weight | Logic |
+|--------|-----------|-------|
+| Stroke Variance | +0.20 | Low variance = typed |
+| Line Regularity | +0.12 | High regularity = typed |
 | Angle Variance | -0.15 to +0.10 | Low = typed, High = handwritten penalty |
-| Edge Density | +0.04 to +0.08 | Moderate density = typed |
-| Form Structure | +0.15 to +0.35 | Forms/tables = typed document |
-| Character Uniformity | +0.06 to +0.12 | Uniform heights = typed |
+| Edge Density | +0.08 | Moderate density = typed |
+| Form Structure | +0.30 | Forms/tables = typed (largest weight) |
+| Character Uniformity | +0.12 | Uniform heights = typed |
 | Signature Isolation | +0.10 | Signatures on forms = typed |
-| Fax Header Detection | +0.15 | Fax/letterhead text = typed |
+| Fax Header Detection | +0.20 | Fax/letterhead text = typed |
 
-**Special Adjustments:**
+**Special adjustments:**
+- **Ruled paper handwriting:** line_score >= 0.95, form_score < 0.25, moderate angle variance -> -0.12 (bias toward handwritten)
+- **High angle variance penalty:** angle_score > 1200, low form_score -> -0.08 to -0.15
+- **Sparse form safeguard:** Low edge density with form structure forces typed_score to 0.65 minimum
 
-| Adjustment | Conditions | Effect |
-|------------|------------|--------|
-| **Ruled Paper Handwriting** | line_score ≥ 0.95(lined paper), form_score < 0.25, angle_score 300-700 | -0.12 (bias toward handwritten) |
-| **High Angle Variance Penalty** | angle_score > 1200, form_score < 0.5 | -0.08 to -0.15 (bias toward handwritten) |
+### Hallucination Detection
 
-**Thresholds:**
-- typed_score ≥ 0.65 → **Typed** (use Surya OCR)
-- typed_score ≤ 0.45 → **Handwritten** (use TrOCR)
-- Otherwise → **Mixed** (use ensemble OCR)
-
-### Post-Processing: Multi-Signal Hallucination Detection
-
-Text elements are scored for hallucination likelihood using 6 signals:
+Text elements are scored using 7 weighted signals:
 
 | Signal | Weight | Description |
 |--------|--------|-------------|
-| Confidence | 20% | Low OCR confidence increases score |
-| Text Length | 15% | Very short text (1-3 chars) is suspicious |
-| Character Patterns | 25% | Repeating chars, only digits, gibberish |
-| Bbox Size | 15% | Abnormally small/large bounding boxes |
-| Dictionary Check | 15% | Non-word that's not a number/date |
-| Repetition | 10% | Repeated words ("the the the") |
+| Confidence | 15% | Low OCR confidence increases score |
+| Text Length | 10% | Very short text (1-2 chars) is suspicious |
+| Character Patterns | 25% | Repeating chars, isolated digits, punctuation-only, unusual chars |
+| Bbox Size | 15% | Tiny bboxes or abnormal aspect ratios |
+| Valid Text Check | 15% | Not matching word/date/email/URL patterns |
+| Repetition | 10% | Consecutive or all-same repeated words |
+| Margin Position | 10% | Text at extreme left/right page edges |
 
-**Decision Logic:**
-- Score > 0.70 → **Remove** (likely hallucination)
-- Score 0.40-0.70 → **Flag** (keep but mark uncertain)
-- Score ≤ 0.40 → **Keep** (likely valid)
+**Decision logic:** Score >= 0.50 -> **Remove**, Score > 0.30 -> **Flag**, Score <= 0.30 -> **Keep**
 
-### Empty Region Filtering
+### Table Validation
 
-Removes hallucinated table and layout regions that don't overlap with actual text content. This prevents false table detections in empty areas of documents.
-
-### Structural Validation Filter
-
-Validates that detected tables have true tabular structure (not just forms or aligned lists). Uses multiple signals:
+Detected tables are validated for true tabular structure:
 
 | Signal | Max Points | Description |
 |--------|------------|-------------|
 | Columns | 40 | 3+ columns = 40 pts, 2 columns = 25 pts |
 | Rows | 25 | 3+ rows = 25 pts, 2 rows = 15 pts |
-| Grid Coverage | 20 | How well text fills the column×row grid |
+| Grid Coverage | 20 | How well text fills the column x row grid |
 | Text Density | 10 | Ratio of text area to table area (3-80%) |
-| Confidence | 5 | Model confidence ≥ 95% |
+| Confidence | 5 | Model confidence >= 95% |
 
-**Decision Logic:**
-- Score ≥ 50 → **Keep** (valid table structure)
-- Score < 50 → **Remove** (likely form or false positive)
+Tables with structure_score < 50 are removed.
 
-**Output Fields Added:**
-- `structure_score`: 0-100 validation score
-- `structure_signals`: Array of detected structural features
+### Heuristic Table Promotion
+
+Detects borderless tables missed by the Table Transformer by analyzing clusters of layout regions:
+
+- Clusters vertically adjacent layout regions (max 20px gap)
+- Requires: 15+ regions, 4+ columns, 5+ rows, 55% grid coverage, score >= 90
+- Refines top boundary via vertical continuity rule to trim non-tabular headers
+- Promoted tables tagged with `source: "heuristic_promotion"` and `confidence: 0.8`
 
 ### Phone Number Normalization
-
-Extracts and normalizes phone numbers from text elements:
 
 | Input Format | Normalized Output |
 |--------------|-------------------|
@@ -194,46 +191,26 @@ Extracts and normalizes phone numbers from text elements:
 | `Fax:614-466-5087` | `(614) 466-5087` |
 | `206 623 0594` | `(206) 623-0594` |
 
-**Adds to JSON:**
-- `normalized_phone` or `normalized_phones` (for multiple)
-- `phone_type`: `"fax"`, `"phone"`, or empty
+Adds `normalized_phone`, `phone_type` (`"fax"` or `"phone"`), and validation status. ZIP codes and dates are excluded.
 
-**False Positive Protection:** ZIP codes (e.g., `64105-2118`) and dates are NOT normalized.
+### OCR Correction System
 
-### Heuristic Table Promotion
+Four correction dictionaries handle different error types:
 
-Detects borderless tables that the Table Transformer model misses by analyzing clusters of `layout_region` elements for tabular structure.
+| Dictionary | Scope | Context Rules |
+|------------|-------|---------------|
+| `OFFENSIVE_OCR_CORRECTIONS` | Regex-based reputational-risk misreads | Unconditional with audit trail |
+| `OCR_CONFUSION_CORRECTIONS` | Single-word substitutions (~25 entries) | Empty context `[]` = unconditional (non-real words only); non-empty = requires context word in 5-word window |
+| `MULTI_WORD_OCR_CORRECTIONS` | Proper noun phrases (~15 entries) | Same context rules; real English phrases require context |
+| `PREFIX_CORRECTIONS` | TrOCR dropped prefixes (un-/dis-) | Handwriting mode only; checks negation context window |
 
-**How it works:**
-1. Clusters vertically adjacent layout regions (max gap: 20px)
-2. Validates cluster structure using column/row alignment
-3. Promotes valid clusters to synthetic `table` elements
+Compound words split on `/` or `-` before matching (e.g., `DIRECTOR/DEPARIMENT` -> `DIRECTOR/DEPARTMENT`).
 
-**Validation Criteria (must meet ALL):**
-
-| Criterion | Threshold | Description |
-|-----------|-----------|-------------|
-| Regions | ≥15 | Minimum layout regions in cluster |
-| Columns | ≥4 | Detected column alignment |
-| Rows | ≥5 | Detected row alignment |
-| Structure Score | ≥90 | Combined structural validation |
-| Grid Coverage | ≥55% | Text elements filling the grid |
-
-**Boundary Refinement:**
-
-Trimms non-tabular header rows from the top using the "Vertical Continuity Rule":
-- A row qualifies as anchor if it has **≥6 items** (high density)
-- OR if it has **≥4 columns spanning ≥60% width** AND the next row also qualifies
-
-**Output Fields Added:**
-- `source: "heuristic_promotion"` - Indicates table was promoted (not model-detected)
-- `confidence: 0.8` - Lower confidence than model-detected tables
-
-## ⚙️ Setup
+## Setup
 
 ### Prerequisites
 *   **OS:** Windows / Linux
-*   **Hardware:** NVIDIA GPU (8GB+ VRAM recommended for full pipeline).
+*   **Hardware:** NVIDIA GPU (8GB+ VRAM recommended)
 *   **Python:** 3.10+
 
 ### Installation
@@ -246,23 +223,49 @@ Trimms non-tabular header rows from the top using the "Vertical Continuity Rule"
     ```bash
     pip install -r requirements.txt
     ```
-    *(Note: Ensure you have PyTorch installed with CUDA support)*
+    Ensure PyTorch is installed with CUDA support. `transformers` is pinned to <5.0.0 for Florence-2 compatibility.
 
-## 🖥️ Usage
+## Usage
 
 ### 1. Run the Pipeline
-Place your document images (PNG, JPG, PDF) in the `input/` directory and run:
+Place document images (PNG, JPG, PDF) in the `input/` directory:
 
 ```bash
 python main.py --input_dir input --output_dir output
 ```
 
-**Arguments:**
-*   `--input_dir`: Source directory (Default: `input`)
-*   `--output_dir`: Destination for JSON files (Default: `output`)
+### 2. Visualize Results
+Generate annotated images with color-coded bounding boxes:
 
-### 2. Output Format
-For each file `input/doc.png`, an `output/doc.json` is generated:
+```bash
+python visualize_output.py --input_dir input --json_dir output --output_dir output/visualized
+```
+
+**Color coding:**
+| Color | Element |
+|-------|---------|
+| Blue | Text (Surya) |
+| Orange | Text (TrOCR) |
+| Dark Blue | Table |
+| Purple | Signature |
+| Teal | Logo |
+| Green | Figure/Image |
+| Red | Hallucination (score >= 0.40) |
+
+**Flags:**
+- `--show-layout` — Show layout region boxes (hidden by default)
+- `--no-content` — Hide text content labels
+- `--no-confidence` — Hide confidence scores
+
+### 3. Run Accuracy Tests
+```bash
+python tests/test_accuracy.py
+python tests/test_accuracy.py --save-baseline   # save current metrics
+python tests/test_accuracy.py --compare          # compare against baseline
+```
+
+### 4. Output Format
+For each input file, a JSON is generated:
 
 ```json
 {
@@ -270,8 +273,9 @@ For each file `input/doc.png`, an `output/doc.json` is generated:
   "pages": [
     {
       "page_number": 1,
-      "document_type": "mixed",
-      "classification_confidence": 0.5,
+      "document_type": "typed",
+      "classification_confidence": 0.78,
+      "language": "en",
       "elements": [
         {
           "type": "text",
@@ -284,16 +288,24 @@ For each file `input/doc.png`, an `output/doc.json` is generated:
           "phone_type": "fax"
         },
         {
-          "type": "layout_region",
-          "region_type": "LABEL_0",
-          "bbox": [100, 200, 500, 250]
+          "type": "text",
+          "content": "Leonard H Jones",
+          "bbox": [300, 800, 600, 850],
+          "confidence": 0.85,
+          "source_model": "trocr",
+          "gap_fill": true
         },
         {
           "type": "table",
-          "bbox": [...],
+          "bbox": [50, 300, 700, 600],
           "confidence": 0.97,
-          "structure_score": 100.0,
+          "structure_score": 85.0,
           "structure_signals": ["columns:5", "rows:12", "grid_coverage:53%"]
+        },
+        {
+          "type": "signature",
+          "bbox": [300, 750, 600, 850],
+          "description": "Detected signature"
         }
       ]
     }
@@ -301,40 +313,62 @@ For each file `input/doc.png`, an `output/doc.json` is generated:
 }
 ```
 
-### 3. Visualization
-To audit the results visually (draws bounding boxes on images):
+**Element types:** `text`, `table`, `layout_region`, `signature`, `logo`, `seal`, `figure`, `image`, `human face`
 
-```bash
-python visualize_output.py --input_dir input --json_dir output --output_dir output/visualized
-```
+**Text element fields:** `content`, `bbox`, `confidence` (Surya's), `source_model` (`surya`/`trocr`), `row_id`, optional `gap_fill`, `in_signature_region`, `hallucination_score`, `hallucination_signals`, `normalized_phone`, `phone_type`, `date_validation`, `offensive_ocr_corrected`
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 Document-Processing-Pipeline/
-├── main.py                    # Entry point
+├── main.py                          # Entry point
+├── visualize_output.py              # Visualization with color-coded annotations
+├── requirements.txt
 ├── src/
-│   ├── processing_pipeline.py # Main DocumentProcessor class
-│   ├── postprocessing.py      # Hallucination detection & cleaning
-│   ├── utils.py               # Classifier & utilities
+│   ├── processing_pipeline.py       # DocumentProcessor: model loading, per-page OCR routing
+│   ├── postprocessing.py            # 17-stage post-processing pipeline (~2400 lines)
+│   ├── utils.py                     # Classification, preprocessing, spell correction, bbox utils
+│   ├── resources/
+│   │   └── domain_dictionary.txt    # Domain vocabulary (legal, pharma terms)
 │   └── models/
-│       ├── handwriting.py     # TrOCR wrapper
-│       ├── table.py           # Table Transformer wrapper
-│       └── layout.py          # LayoutLMv3 wrapper
-├── input/                     # Place documents here
-├── output/                    # JSON results saved here
-└── requirements.txt
+│       ├── handwriting.py           # TrOCR wrapper (beam search, pooler disabled)
+│       ├── table.py                 # Table Transformer (detection + structure)
+│       └── layout.py               # LayoutLMv3 (token classification, bbox normalization)
+├── input/                           # Place documents here
+├── output/                          # JSON results + visualized/ subdirectory
+└── tests/
+    ├── test_accuracy.py             # WER/CER regression tests
+    └── flexible_evaluation.py       # Punctuation-insensitive evaluator
 ```
 
-## 🧩 Dependencies
-*   `surya-ocr`
-*   `transformers` (Hugging Face)
-*   `torch`
-*   `opencv-python`
-*   `pillow`
-*   `scikit-learn`
-*   `numpy`
+## Models
 
-## 📜 License
+| Model | Source | Purpose |
+|-------|--------|---------|
+| Florence-2 | microsoft/Florence-2-large-ft | Phrase grounding (signatures, handwriting), object detection, captioning |
+| Surya | surya v0.17 API | Primary OCR for typed text |
+| TrOCR | microsoft/trocr-large-handwritten | Handwriting recognition (beam search, 4 beams) |
+| Table Transformer | microsoft/table-transformer-detection + structure-recognition | Table detection (0.7 threshold) and structure extraction (0.5 threshold) |
+| LayoutLMv3 | microsoft/layoutlmv3-large | Document layout classification (bbox normalized to 0-1000 scale) |
+
+All models load onto GPU if available, falling back to CPU.
+
+## Dependencies
+
+*   `torch` (with CUDA support)
+*   `torchvision`
+*   `transformers` (>=4.38.0, <5.0.0)
+*   `surya-ocr`
+*   `Pillow`
+*   `numpy`
+*   `opencv-python-headless`
+*   `scikit-learn`
+*   `langdetect`
+*   `pyspellchecker`
+*   `pypdfium2`
+*   `accelerate`
+*   `einops`, `timm`, `scipy`
+
+## License
 
 MIT License
