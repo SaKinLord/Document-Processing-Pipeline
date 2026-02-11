@@ -107,20 +107,29 @@ OFFENSIVE_OCR_CORRECTIONS = [
 ]
 
 
-def filter_offensive_ocr_misreads(elements: List[Dict]) -> List[Dict]:
+def filter_offensive_ocr_misreads(elements: List[Dict], page_image=None,
+                                   handwriting_recognizer=None) -> List[Dict]:
     """
-    Detect and correct known offensive OCR misreads.
+    Detect and correct known offensive OCR misreads with source image re-verification.
 
-    Some OCR models produce offensive words from innocuous source text.
-    This filter catches known patterns and replaces them with the correct
-    reading, adding a flag to the element for audit purposes.
+    When a text element matches an offensive pattern and the source image + TrOCR
+    are available, the bbox region is re-cropped and re-OCR'd as a tiebreaker:
+    - If TrOCR also produces the offensive word → keep original (both models agree)
+    - If TrOCR produces something different → use TrOCR's result
+
+    Falls back to blind regex replacement when re-verification is not possible
+    (no image, no model, or source_model is already TrOCR).
 
     Args:
         elements: List of element dictionaries
+        page_image: PIL Image of the page (optional, enables re-verification)
+        handwriting_recognizer: TrOCR recognizer instance (optional)
 
     Returns:
         Elements with offensive misreads corrected
     """
+    can_reverify = page_image is not None and handwriting_recognizer is not None
+
     for element in elements:
         if element.get("type") != "text":
             continue
@@ -129,17 +138,136 @@ def filter_offensive_ocr_misreads(elements: List[Dict]) -> List[Dict]:
         if not content:
             continue
 
-        corrected = content
         corrections_made = []
 
         for pattern, replacement in OFFENSIVE_OCR_CORRECTIONS:
-            if pattern.search(corrected):
-                corrected = pattern.sub(replacement, corrected)
-                corrections_made.append(f"{pattern.pattern} -> {replacement}")
+            if not pattern.search(content):
+                continue
+
+            source_model = element.get("source_model", "")
+
+            # Try re-verification: crop bbox and re-OCR with TrOCR
+            if can_reverify and source_model == "surya" and element.get("bbox"):
+                bbox = element["bbox"]
+                crop = page_image.crop((bbox[0], bbox[1], bbox[2], bbox[3]))
+                reocr_text, reocr_conf = handwriting_recognizer.recognize(crop)
+                reocr_text = _clean_trocr_trailing_period(reocr_text)
+
+                if pattern.search(reocr_text):
+                    # Both models produce offensive word — likely genuine text, keep original
+                    corrections_made.append({
+                        "pattern": pattern.pattern,
+                        "original_text": content,
+                        "action": "reverified_kept",
+                        "reocr_text": reocr_text,
+                        "reocr_confidence": round(reocr_conf, 4),
+                        "final_text": content,
+                    })
+                else:
+                    # TrOCR disagrees — use its result
+                    content = reocr_text
+                    corrections_made.append({
+                        "pattern": pattern.pattern,
+                        "original_text": element["content"],
+                        "action": "reverified_corrected",
+                        "reocr_text": reocr_text,
+                        "reocr_confidence": round(reocr_conf, 4),
+                        "final_text": reocr_text,
+                    })
+            else:
+                # No re-verification possible — apply regex replacement as fallback
+                original = content
+                content = pattern.sub(replacement, content)
+                corrections_made.append({
+                    "pattern": pattern.pattern,
+                    "original_text": original,
+                    "action": "regex_fallback",
+                    "final_text": content,
+                })
 
         if corrections_made:
-            element["content"] = corrected
+            element["content"] = content
             element["offensive_ocr_corrected"] = corrections_made
+
+    return elements
+
+
+# ============================================================================
+# TrOCR Trailing Period Cleanup
+# ============================================================================
+
+# Abbreviations where a trailing period is legitimate and should be kept
+TROCR_PERIOD_SAFE_ABBREVIATIONS = {
+    'inc', 'corp', 'co', 'jr', 'sr', 'dr', 'mr', 'mrs', 'ms',
+    'ltd', 'ave', 'st', 'blvd', 'dept', 'no', 'vs', 'etc',
+}
+
+
+def _clean_trocr_trailing_period(text: str) -> str:
+    """Remove spurious trailing period from TrOCR output.
+
+    TrOCR (trained on handwritten sentences) appends trailing periods to
+    typed labels, headers, names, and numbers. This strips them while
+    preserving legitimate abbreviation periods (Inc., Corp., Co., etc.).
+
+    Also handles the " ." (space+period) pattern from TrOCR crop re-OCR.
+    """
+    text = text.rstrip()
+
+    # Handle " ." pattern (space + period, common in short crop re-OCR)
+    if text.endswith(' .'):
+        return text[:-2].rstrip()
+
+    # Handle trailing "."
+    if text.endswith('.'):
+        without_period = text[:-1]
+        words = without_period.split()
+        if words:
+            last_word = words[-1].lower()
+            # Protect known abbreviations
+            if last_word in TROCR_PERIOD_SAFE_ABBREVIATIONS:
+                return text
+            # Protect single-letter abbreviations (e.g., "S." in initials)
+            if len(last_word) == 1 and last_word.isalpha():
+                return text
+        return without_period
+
+    return text
+
+
+def strip_trocr_trailing_periods(elements: List[Dict], document_type: str = "typed") -> List[Dict]:
+    """Strip spurious trailing periods from TrOCR text elements.
+
+    TrOCR appends trailing periods when processing typed text (labels,
+    headers, names, numbers). This is a model artifact from training on
+    handwritten sentences that naturally end with periods.
+
+    Skipped for handwritten documents where periods are legitimate
+    end-of-sentence punctuation.
+
+    Args:
+        elements: List of element dictionaries
+        document_type: Page classification ("typed", "handwritten", "mixed")
+
+    Returns:
+        Elements with spurious trailing periods removed
+    """
+    if document_type == "handwritten":
+        return elements
+
+    for element in elements:
+        if element.get("type") != "text":
+            continue
+        if element.get("source_model") != "trocr":
+            continue
+
+        content = element.get("content", "")
+        if not content:
+            continue
+
+        cleaned = _clean_trocr_trailing_period(content)
+        if cleaned != content:
+            element["content"] = cleaned
 
     return elements
 
@@ -1340,7 +1468,8 @@ def promote_layout_regions_to_tables(elements: List[Dict]) -> List[Dict]:
     return elements
 
 
-def postprocess_output(output_data: Dict[str, Any]) -> Dict[str, Any]:
+def postprocess_output(output_data: Dict[str, Any], page_images=None,
+                       handwriting_recognizer=None) -> Dict[str, Any]:
     """
     Apply all post-processing to OCR output.
 
@@ -1352,8 +1481,9 @@ def postprocess_output(output_data: Dict[str, Any]) -> Dict[str, Any]:
     1. Deduplicate layout regions
     2. Score and handle hallucinations (with margin awareness)
     2.1. Filter rotated margin text (Bates numbers, vertical IDs)
-    2.5. Filter offensive OCR misreads (P0 reputational risk)
+    2.5. Filter offensive OCR misreads (P0 reputational risk, with re-verification)
     3. Clean text content
+    3.05. Strip spurious TrOCR trailing periods (typed/mixed docs only)
     3.1. Repair dropped parentheses (P3)
     3.25. Apply handwritten OCR corrections (with slash-compound splitting)
     3.26. Apply multi-word proper noun corrections (P1)
@@ -1364,11 +1494,13 @@ def postprocess_output(output_data: Dict[str, Any]) -> Dict[str, Any]:
 
     Args:
         output_data: Raw OCR output dictionary
-        
+        page_images: List of PIL Images per page (optional, enables offensive filter re-verification)
+        handwriting_recognizer: TrOCR recognizer instance (optional)
+
     Returns:
         Cleaned output dictionary
     """
-    for page in output_data.get("pages", []):
+    for page_idx, page in enumerate(output_data.get("pages", [])):
         elements = page.get("elements", [])
         
         # Step 0: Filter empty table/layout regions
@@ -1392,11 +1524,17 @@ def postprocess_output(output_data: Dict[str, Any]) -> Dict[str, Any]:
         # Step 2.1: Filter rotated margin text (Bates numbers, vertical IDs)
         elements = filter_rotated_margin_text(elements)
 
-        # Step 2.5: Filter offensive OCR misreads
-        elements = filter_offensive_ocr_misreads(elements)
+        # Step 2.5: Filter offensive OCR misreads (with source image re-verification)
+        page_image = page_images[page_idx] if page_images and page_idx < len(page_images) else None
+        elements = filter_offensive_ocr_misreads(elements, page_image=page_image,
+                                                  handwriting_recognizer=handwriting_recognizer)
 
         # Step 3: Clean text content
         elements = clean_text_content(elements)
+
+        # Step 3.05: Strip spurious TrOCR trailing periods (typed/mixed docs only)
+        doc_type = page.get("document_type", "typed")
+        elements = strip_trocr_trailing_periods(elements, document_type=doc_type)
 
         # Step 3.1: Repair dropped parentheses
         for element in elements:

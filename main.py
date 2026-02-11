@@ -27,8 +27,6 @@ def main():
         return
 
     files = [f for f in os.listdir(args.input_dir) if os.path.isfile(os.path.join(args.input_dir, f))]
-    # EMERGENCY FIX: TARGET ONLY 87428306.png
-    files = [f for f in os.listdir(args.input_dir) if os.path.isfile(os.path.join(args.input_dir, f))]
     print(f"Found {len(files)} files in {args.input_dir}")
 
     for filename in files:
@@ -39,9 +37,10 @@ def main():
         output_file_path = os.path.join(args.output_dir, output_filename)
 
         try:
-            doc_data = processor.process_document(file_path)
+            doc_data, page_images = processor.process_document(file_path)
             # Apply post-processing: deduplication, hallucination detection, text cleaning
-            doc_data = postprocess_output(doc_data)
+            doc_data = postprocess_output(doc_data, page_images=page_images,
+                                          handwriting_recognizer=processor.handwriting_recognizer)
             with open(output_file_path, "w", encoding="utf-8") as f:
                 json.dump(doc_data, f, indent=2, ensure_ascii=False)
         except Exception as e:

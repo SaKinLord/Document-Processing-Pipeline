@@ -6,7 +6,6 @@ A local pipeline for extracting structured data from complex, multi-format docum
 
 *   **Intelligent 8-Feature Classification:** Automatically detects document type using stroke width variance, line regularity, contour angle variance, edge density, form structure detection, character uniformity, signature region isolation, and fax/letterhead header detection. Includes ruled paper handwriting detection and sparse form safeguards.
 *   **Per-Line Handwriting Routing:** Florence-2 phrase grounding detects signature and handwritten text regions before OCR. Lines overlapping these regions are routed to TrOCR ensemble regardless of page-level classification, catching handwritten fill-ins, names, and annotations on typed forms.
-*   **TrOCR Gap-Fill:** Signature regions with low Surya coverage (<50%) are cropped and sent directly to TrOCR, recovering cursive signatures that Surya's line detector misses entirely.
 *   **Multi-Model Intelligence:**
     *   **Surya OCR:** High-precision text detection and recognition for typed documents
     *   **TrOCR:** Specialized handwriting recognition with beam search (4 beams), 12px bbox padding for descenders, and punctuation spacing normalization
@@ -82,11 +81,6 @@ Flexible evaluation ignores punctuation and formatting differences. Pass/fail is
            -> forced ensemble regardless of page type
          Signature overlap -> 0.90 TrOCR gate
          Handwriting overlap -> normal gate
-                     |
-                     v
-              TROCR GAP-FILL
-       Signature regions with <50% Surya coverage
-       -> crop & run TrOCR directly (conf >= 0.30)
                      |
                      v
               LAYOUT ANALYSIS
@@ -293,7 +287,7 @@ For each input file, a JSON is generated:
           "bbox": [300, 800, 600, 850],
           "confidence": 0.85,
           "source_model": "trocr",
-          "gap_fill": true
+          "in_signature_region": true
         },
         {
           "type": "table",
@@ -315,7 +309,7 @@ For each input file, a JSON is generated:
 
 **Element types:** `text`, `table`, `layout_region`, `signature`, `logo`, `seal`, `figure`, `image`, `human face`
 
-**Text element fields:** `content`, `bbox`, `confidence` (Surya's), `source_model` (`surya`/`trocr`), `row_id`, optional `gap_fill`, `in_signature_region`, `hallucination_score`, `hallucination_signals`, `normalized_phone`, `phone_type`, `date_validation`, `offensive_ocr_corrected`
+**Text element fields:** `content`, `bbox`, `confidence` (Surya's), `source_model` (`surya`/`trocr`), `row_id`, optional `in_signature_region`, `hallucination_score`, `hallucination_signals`, `normalized_phone`, `phone_type`, `date_validation`, `offensive_ocr_corrected`
 
 ## Project Structure
 

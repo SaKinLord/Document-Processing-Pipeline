@@ -99,7 +99,7 @@ class DocumentProcessor:
             page_data = self.process_page(image, page_num=i+1)
             results["pages"].append(page_data)
             
-        return results
+        return results, images
 
 
     def detect_language(self, text):
@@ -321,54 +321,6 @@ class DocumentProcessor:
                 ocr_words.extend(line_words)
                 ocr_boxes.extend(word_bboxes)
 
-            
-        # Gap-fill: Run TrOCR directly on signature regions that Surya missed
-        # Surya's line detector sometimes doesn't create text lines for cursive
-        # handwriting (e.g., "Leonard H Jones", "Lynnette Kaye Stevens").
-        # For signature regions with low Surya coverage, crop and try TrOCR.
-        for region in handwritten_regions:
-            if region['type'] != 'signature':
-                continue
-            rb = region['bbox']
-            region_area = (rb[2] - rb[0]) * (rb[3] - rb[1])
-            if region_area <= 0:
-                continue
-
-            # Calculate how much of this region Surya already covers
-            covered_area = 0
-            for te in text_elements:
-                tb = te['bbox']
-                ix1 = max(rb[0], tb[0])
-                iy1 = max(rb[1], tb[1])
-                ix2 = min(rb[2], tb[2])
-                iy2 = min(rb[3], tb[3])
-                if ix2 > ix1 and iy2 > iy1:
-                    covered_area += (ix2 - ix1) * (iy2 - iy1)
-
-            coverage = covered_area / region_area
-            if coverage >= 0.50:
-                continue  # Well covered by Surya, skip
-
-            # Low coverage — crop and run TrOCR on the signature region
-            padded = pad_bbox(list(rb), 12, width, height)
-            crop = crop_image(image, padded)
-            hw_text, hw_conf = self.handwriting_recognizer.recognize(crop)
-
-            if hw_text and len(hw_text.strip()) > 0 and hw_conf >= 0.30:
-                corrected = self.spell_corrector.correct_text(
-                    normalize_punctuation_spacing(hw_text)
-                )
-                gap_element = {
-                    "type": "text",
-                    "content": corrected,
-                    "bbox": list(rb),
-                    "confidence": hw_conf,
-                    "source_model": "trocr",
-                    "gap_fill": True
-                }
-                text_elements.append(gap_element)
-                all_text_content.append(corrected)
-                print(f"  [GAP-FILL] TrOCR on signature region: '{corrected}' (conf: {hw_conf:.2f})")
 
         # Detect Language
         full_text = " ".join(all_text_content)
