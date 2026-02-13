@@ -17,7 +17,8 @@ ocr_accuracy_summary.csv
 ocr_error_examples.md
 
 # Input files (user-specific test documents)
-input/
+input/*
+!input/.gitkeep
 
 # Test files
 tests/
