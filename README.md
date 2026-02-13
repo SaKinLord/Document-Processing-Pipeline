@@ -27,13 +27,13 @@ A local pipeline for extracting structured data from complex, multi-format docum
 
 ## Accuracy & Performance
 
-Based on regression testing with 15 ground truth documents (5 handwritten, 10 typed):
+Based on regression testing with 32 ground truth documents (typed, handwritten, and mixed):
 
 | Metric | Value |
 |--------|-------|
-| Regression Tests | **15/15 passing** |
-| Average Flex WER | **~8.5%** |
-| Average Flex CER | **~5.7%** |
+| Regression Tests | **30/32 passing** |
+| Average Flex WER | **~12.1%** |
+| Average Flex CER | **~8.3%** |
 
 Flexible evaluation ignores punctuation and formatting differences. Pass/fail is determined by flex CER.
 
