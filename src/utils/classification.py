@@ -202,7 +202,8 @@ def detect_signature_region(image):
                 'has_signature': False,
                 'region_bbox': None
             }
-    except Exception:
+    except Exception as e:
+        logger.warning("detect_signature_region failed: %s", e)
         return {
             'has_signature': False,
             'region_bbox': None
@@ -241,7 +242,8 @@ def _detect_signature_in_region(region):
 
         return 1 <= sig_components <= 15
 
-    except Exception:
+    except Exception as e:
+        logger.debug("_detect_signature_in_region failed: %s", e)
         return False
 
 
@@ -270,7 +272,8 @@ def _detect_fax_header(header_region):
 
         return has_lines and has_dense_text
 
-    except Exception:
+    except Exception as e:
+        logger.debug("_detect_fax_header failed: %s", e)
         return False
 
 
@@ -295,7 +298,8 @@ def _calculate_stroke_variance(gray):
         cv_score = np.std(stroke_widths) / mean_width
         return min(cv_score / 0.5, 1.0)
 
-    except Exception:
+    except Exception as e:
+        logger.debug("_calculate_stroke_variance failed: %s", e)
         return 0.5
 
 
@@ -332,7 +336,8 @@ def _calculate_line_regularity(gray):
 
         return regularity
 
-    except Exception:
+    except Exception as e:
+        logger.debug("_calculate_line_regularity failed: %s", e)
         return 0.5
 
 
@@ -358,7 +363,8 @@ def _calculate_angle_variance(gray):
 
         return np.var(angles)
 
-    except Exception:
+    except Exception as e:
+        logger.debug("_calculate_angle_variance failed: %s", e)
         return 1000
 
 
@@ -373,7 +379,8 @@ def _calculate_edge_density(gray):
 
         return edge_pixels / total_pixels if total_pixels > 0 else 0.0
 
-    except Exception:
+    except Exception as e:
+        logger.debug("_calculate_edge_density failed: %s", e)
         return 0.1
 
 
@@ -406,7 +413,8 @@ def _detect_form_structure(gray):
 
         return form_score
 
-    except Exception:
+    except Exception as e:
+        logger.debug("_detect_form_structure failed: %s", e)
         return 0.0
 
 
@@ -443,5 +451,6 @@ def _calculate_character_uniformity(gray):
 
         return min(uniformity, 1.0)
 
-    except Exception:
+    except Exception as e:
+        logger.debug("_calculate_character_uniformity failed: %s", e)
         return 0.5

@@ -6,19 +6,45 @@ TrOCR trailing period removal, parenthesis repair, and duplicate word removal.
 """
 
 import re
+import logging
 from typing import Dict, List
+
+logger = logging.getLogger(__name__)
+
+
+def normalize_underscores(text: str) -> str:
+    """
+    Normalize underscore fill-in patterns in a text string.
+
+    Canonical text→text function shared by the pipeline and test framework.
+
+    - '_ _ _ _' → '___'
+    - '________' → '___'
+    - 'Name:      ' → 'Name: ___'
+    - Collapses double spaces
+
+    Args:
+        text: Raw text string
+
+    Returns:
+        Text with normalized underscores
+    """
+    # Normalize spaced underscores: '_ _ _ _' -> '____' then collapse
+    text = re.sub(r'(_\s+){2,}_', '___', text)
+    # Collapse runs of 3+ underscores to a single '___'
+    text = re.sub(r'_{3,}', '___', text)
+    # Collapse runs of 3+ spaces after a colon/label to ' ___'
+    text = re.sub(r'(:\s*)\s{3,}', r'\1___', text)
+    # Clean up any resulting double spaces
+    text = re.sub(r' {2,}', ' ', text)
+    return text
 
 
 def normalize_underscore_fields(elements: List[Dict]) -> List[Dict]:
     """
     Normalize blank form fields (underscore runs, excessive spaces after labels).
 
-    OCR produces inconsistent representations of fill-in fields:
-    - 'Name:________' -> 'Name: ___'
-    - 'Name:         ' -> 'Name: ___'
-    - 'Name: _ _ _ _' -> 'Name: ___'
-
-    Standardizes all to a single '___' token for consistent comparison.
+    Applies normalize_underscores() to each text element.
 
     Args:
         elements: List of element dictionaries
@@ -34,16 +60,7 @@ def normalize_underscore_fields(elements: List[Dict]) -> List[Dict]:
         if not content:
             continue
 
-        # Normalize spaced underscores: '_ _ _ _' -> '____' then collapse
-        content = re.sub(r'(_\s+){2,}_', '___', content)
-        # Collapse runs of 3+ underscores to a single '___'
-        content = re.sub(r'_{3,}', '___', content)
-        # Collapse runs of 3+ spaces after a colon/label to ' ___'
-        content = re.sub(r'(:\s*)\s{3,}', r'\1___', content)
-        # Clean up any resulting double spaces
-        content = re.sub(r' {2,}', ' ', content)
-
-        element["content"] = content.strip()
+        element["content"] = normalize_underscores(content).strip()
 
     return elements
 
@@ -216,6 +233,7 @@ def strip_trocr_trailing_periods(elements: List[Dict], document_type: str = "typ
 
         cleaned = _clean_trocr_trailing_period(content)
         if cleaned != content:
+            logger.debug("TrOCR period stripped: '%s' → '%s'", content[:60], cleaned[:60])
             element["content"] = cleaned
 
     return elements
@@ -303,6 +321,8 @@ def remove_consecutive_duplicate_words(elements: List[Dict]) -> List[Dict]:
                 deduplicated.append(word)
 
         if len(deduplicated) < len(words):
+            logger.debug("Duplicate words removed (%d): '%s' → '%s'",
+                         len(words) - len(deduplicated), content[:60], ' '.join(deduplicated)[:60])
             element["content"] = ' '.join(deduplicated)
             element["duplicate_words_removed"] = len(words) - len(deduplicated)
 

@@ -6,6 +6,7 @@ Re-exports all public functions for backwards-compatible imports.
 
 from .pipeline import postprocess_output, deduplicate_layout_regions
 from .normalization import (
+    normalize_underscores,
     normalize_underscore_fields,
     normalize_punctuation_spacing,
     clean_text_content,
@@ -37,7 +38,8 @@ from .table_validation import (
 )
 from .ocr_corrections import (
     filter_offensive_ocr_misreads,
-    apply_ocr_corrections_handwritten,
+    apply_ocr_corrections,
+    apply_ocr_corrections_handwritten,  # backwards-compatible alias
     apply_multi_word_ocr_corrections,
     OFFENSIVE_OCR_CORRECTIONS,
     OCR_CONFUSION_CORRECTIONS,
@@ -66,6 +68,7 @@ __all__ = [
     'postprocess_output',
     'deduplicate_layout_regions',
     # Normalization
+    'normalize_underscores',
     'normalize_underscore_fields',
     'normalize_punctuation_spacing',
     'clean_text_content',
@@ -94,7 +97,8 @@ __all__ = [
     'refine_table_top_boundary',
     # OCR corrections
     'filter_offensive_ocr_misreads',
-    'apply_ocr_corrections_handwritten',
+    'apply_ocr_corrections',
+    'apply_ocr_corrections_handwritten',  # backwards-compatible alias
     'apply_multi_word_ocr_corrections',
     'OFFENSIVE_OCR_CORRECTIONS',
     'OCR_CONFUSION_CORRECTIONS',

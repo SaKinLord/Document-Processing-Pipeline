@@ -100,6 +100,9 @@ def filter_offensive_ocr_misreads(elements: List[Dict], page_image=None,
         if corrections_made:
             element["content"] = content
             element["offensive_ocr_corrected"] = corrections_made
+            for c in corrections_made:
+                logger.debug("Offensive re-verification: %s → %s (action=%s)",
+                             c["original_text"][:60], c["final_text"][:60], c["action"])
 
     return elements
 
@@ -172,9 +175,9 @@ PREFIX_CORRECTIONS = {
 NEGATION_CONTEXT = ['not', "n't", 'never', 'but', 'yet', 'nor', 'neither', 'nothing', 'none', 'chosen']
 
 
-def apply_ocr_corrections_handwritten(text: str, is_handwritten: bool = False, page_context: set = None) -> str:
+def apply_ocr_corrections(text: str, page_context: set = None) -> str:
     """
-    Apply OCR-specific corrections for handwritten documents only.
+    Apply OCR-specific corrections (confusion pairs, prefix restoration).
 
     Uses flexible context matching -- looks for context words within a 5-word
     window around the potentially confused word. Falls back to page-level
@@ -182,14 +185,13 @@ def apply_ocr_corrections_handwritten(text: str, is_handwritten: bool = False, p
 
     Args:
         text: OCR text to correct
-        is_handwritten: Whether the source document is handwritten
         page_context: Optional set of lowercased words from all text elements
                       on the page, used as fallback for short/standalone elements
 
     Returns:
-        Corrected text (unchanged if not handwritten)
+        Corrected text
     """
-    if not is_handwritten or not text:
+    if not text:
         return text
 
     words = text.split()
@@ -235,6 +237,7 @@ def apply_ocr_corrections_handwritten(text: str, is_handwritten: bool = False, p
             if word_lower == wrong:
                 if not context or any(ctx in context_words for ctx in context) or (page_context and any(ctx in page_context for ctx in context)):
                     corrected = correct if stripped.islower() else correct.upper() if stripped.isupper() else correct.capitalize()
+                    logger.debug("OCR correction: '%s' → '%s'", stripped, corrected)
                     break
 
         # Check prefix restoration in negation/contrast context
@@ -243,6 +246,7 @@ def apply_ocr_corrections_handwritten(text: str, is_handwritten: bool = False, p
             if any(neg in window for neg in NEGATION_CONTEXT):
                 restored = PREFIX_CORRECTIONS[word_lower]
                 corrected = restored if stripped.islower() else restored.upper() if stripped.isupper() else restored.capitalize()
+                logger.debug("Prefix restoration: '%s' → '%s'", stripped, corrected)
 
         corrected_words.append(corrected + suffix)
 
@@ -269,7 +273,12 @@ def apply_multi_word_ocr_corrections(text: str, page_context: set = None) -> str
         pattern = re.compile(re.escape(wrong), re.IGNORECASE)
         if pattern.search(text):
             if not context or any(ctx in text_lower for ctx in context) or (page_context and any(ctx in page_context for ctx in context)):
+                logger.debug("Multi-word OCR correction: '%s' → '%s'", wrong, correct)
                 text = pattern.sub(correct, text)
                 text_lower = text.lower()
 
     return text
+
+
+# Backwards-compatible alias (renamed from apply_ocr_corrections_handwritten)
+apply_ocr_corrections_handwritten = apply_ocr_corrections

@@ -47,6 +47,8 @@ def process_hallucinations(elements: List[Dict]) -> List[Dict]:
         page_height = 792
 
     processed = []
+    removed_count = 0
+    flagged_count = 0
 
     for element in elements:
         if element.get("type") != "text":
@@ -64,14 +66,23 @@ def process_hallucinations(elements: List[Dict]) -> List[Dict]:
 
         if score >= 0.50:
             # High hallucination likelihood - remove (tightened from > 0.50)
+            logger.debug("Hallucination removed (score=%.3f): %s | signals=%s",
+                         score, content[:60], signals)
+            removed_count += 1
             continue
         elif score > 0.30:
             # Uncertain - flag but keep (tightened from 0.40)
             element["hallucination_flag"] = True
             element["hallucination_score"] = round(score, 3)
             element["hallucination_signals"] = signals
+            logger.debug("Hallucination flagged (score=%.3f): %s | signals=%s",
+                         score, content[:60], signals)
+            flagged_count += 1
 
         processed.append(element)
+
+    if removed_count or flagged_count:
+        logger.info("Hallucination filter: %d removed, %d flagged", removed_count, flagged_count)
 
     return processed
 

@@ -22,7 +22,7 @@ from .table_validation import (
 )
 from .ocr_corrections import (
     filter_offensive_ocr_misreads,
-    apply_ocr_corrections_handwritten,
+    apply_ocr_corrections,
     apply_multi_word_ocr_corrections,
 )
 from .phone_date import normalize_phone_numbers
@@ -34,6 +34,15 @@ from .signatures import (
 from .helpers import bbox_overlap
 
 logger = logging.getLogger(__name__)
+
+
+def _log_step(name: str, before: int, after: int) -> None:
+    """Log a postprocessing step, using INFO when elements are removed."""
+    delta = before - after
+    if delta > 0:
+        logger.info("  [%s] %d → %d elements (removed %d)", name, before, after, delta)
+    else:
+        logger.debug("  [%s] %d elements (no change)", name, before)
 
 
 def deduplicate_layout_regions(elements):
@@ -92,44 +101,66 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
     """
     for page_idx, page in enumerate(output_data.get("pages", [])):
         elements = page.get("elements", [])
+        logger.info("Postprocessing page %d (%d elements)", page_idx + 1, len(elements))
 
         # Step 0: Filter empty table/layout regions
+        count_before = len(elements)
         elements = filter_empty_regions(elements)
+        _log_step("filter_empty", count_before, len(elements))
 
         # Step 0.25: Normalize underscore fill-in fields
+        count_before = len(elements)
         elements = normalize_underscore_fields(elements)
+        _log_step("normalize_underscores", count_before, len(elements))
 
         # Step 0.5: Validate table structure (remove false positives)
+        count_before = len(elements)
         elements = filter_invalid_tables(elements)
+        _log_step("filter_tables", count_before, len(elements))
 
         # Step 0.6: Heuristic table promotion (detect missed tables)
+        count_before = len(elements)
         elements = promote_layout_regions_to_tables(elements)
+        _log_step("promote_tables", count_before, len(elements))
 
         # Step 1: Deduplicate layout regions
+        count_before = len(elements)
         elements = deduplicate_layout_regions(elements)
+        _log_step("dedup_layout", count_before, len(elements))
 
         # Step 2: Score and handle hallucinations
+        count_before = len(elements)
         elements = process_hallucinations(elements)
+        _log_step("hallucinations", count_before, len(elements))
 
         # Step 2.1: Filter rotated margin text (Bates numbers, vertical IDs)
+        count_before = len(elements)
         elements = filter_rotated_margin_text(elements)
+        _log_step("rotated_margin", count_before, len(elements))
 
         # Step 2.5: Filter offensive OCR misreads (with source image re-verification)
+        count_before = len(elements)
         page_image = page_images[page_idx] if page_images and page_idx < len(page_images) else None
         elements = filter_offensive_ocr_misreads(elements, page_image=page_image,
                                                   handwriting_recognizer=handwriting_recognizer)
+        _log_step("offensive_filter", count_before, len(elements))
 
         # Step 3: Clean text content
+        count_before = len(elements)
         elements = clean_text_content(elements)
+        _log_step("clean_text", count_before, len(elements))
 
         # Step 3.05: Strip spurious TrOCR trailing periods (typed/mixed docs only)
         doc_type = page.get("document_type", "typed")
+        count_before = len(elements)
         elements = strip_trocr_trailing_periods(elements, document_type=doc_type)
+        _log_step("trocr_period_strip", count_before, len(elements))
 
         # Step 3.1: Repair dropped parentheses
         for element in elements:
             if element.get('type') == 'text' and element.get('content'):
                 element['content'] = repair_dropped_parentheses(element['content'])
+        logger.debug("  [paren_repair] applied to text elements")
 
         # Step 3.25: Apply OCR corrections (with slash-compound splitting)
         page_context = set()
@@ -139,26 +170,36 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
                     page_context.add(w.rstrip(':.,;!?').lower())
         for element in elements:
             if element.get('type') == 'text' and element.get('content'):
-                element['content'] = apply_ocr_corrections_handwritten(
-                    element['content'], is_handwritten=True, page_context=page_context
+                element['content'] = apply_ocr_corrections(
+                    element['content'], page_context=page_context
                 )
+        logger.debug("  [ocr_corrections] applied to text elements")
 
         # Step 3.26: Apply multi-word proper noun corrections
         for element in elements:
             if element.get('type') == 'text' and element.get('content'):
                 element['content'] = apply_multi_word_ocr_corrections(element['content'], page_context=page_context)
+        logger.debug("  [multi_word_corrections] applied to text elements")
 
         # Step 3.3: Replace signature text readings with '(signature)'
+        count_before = len(elements)
         elements = replace_signature_text(elements)
+        _log_step("signatures", count_before, len(elements))
 
         # Step 3.35: Remove short garbage text overlapping signature regions
+        count_before = len(elements)
         elements = filter_signature_overlap_garbage(elements)
+        _log_step("sig_garbage_filter", count_before, len(elements))
 
         # Step 3.5: Remove consecutive duplicate words (TrOCR beam search artifact)
+        count_before = len(elements)
         elements = remove_consecutive_duplicate_words(elements)
+        _log_step("dedup_words", count_before, len(elements))
 
         # Step 4: Normalize phone numbers
+        count_before = len(elements)
         elements = normalize_phone_numbers(elements)
+        _log_step("phones", count_before, len(elements))
 
         # Step 5: Classification refinement (detect misclassified typed docs)
         all_text = ' '.join([e.get('content', '') for e in elements if e.get('type') == 'text'])

@@ -16,6 +16,7 @@ from src.utils import (
     SpellCorrector, classify_document_type, detect_signature_region,
     split_line_bbox_to_words,
 )
+from src.utils.bbox import bbox_overlap_ratio_of, bboxes_intersect
 from src.models.handwriting import HandwritingRecognizer
 from src.models.table import TableRecognizer
 from src.models.layout import LayoutAnalyzer
@@ -210,8 +211,8 @@ class DocumentProcessor:
                     if 'signature' in label.lower():
                         signature_bboxes.append(bbox)
             torch.cuda.empty_cache()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Florence-2 signature detection failed: %s", e)
 
         # Detect handwriting bboxes
         handwriting_bboxes = []
@@ -222,8 +223,8 @@ class DocumentProcessor:
                                        hw_results['<CAPTION_TO_PHRASE_GROUNDING>']['labels']):
                     handwriting_bboxes.append(bbox)
             torch.cuda.empty_cache()
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning("Florence-2 handwriting detection failed: %s", e)
 
         # Build unified list with type metadata
         handwritten_regions: List[Dict[str, Any]] = []
@@ -233,16 +234,9 @@ class DocumentProcessor:
         for hb in handwriting_bboxes:
             overlaps_signature = False
             for sb in signature_bboxes:
-                ix1 = max(hb[0], sb[0])
-                iy1 = max(hb[1], sb[1])
-                ix2 = min(hb[2], sb[2])
-                iy2 = min(hb[3], sb[3])
-                if ix2 > ix1 and iy2 > iy1:
-                    intersection = (ix2 - ix1) * (iy2 - iy1)
-                    hb_area = (hb[2] - hb[0]) * (hb[3] - hb[1])
-                    if hb_area > 0 and intersection / hb_area > 0.50:
-                        overlaps_signature = True
-                        break
+                if bbox_overlap_ratio_of(hb, sb, reference_bbox=hb) > 0.50:
+                    overlaps_signature = True
+                    break
             if not overlaps_signature:
                 handwritten_regions.append({'bbox': hb, 'type': 'handwriting'})
 
@@ -273,8 +267,7 @@ class DocumentProcessor:
         for line in ocr_result.text_lines:
             # Lower confidence threshold for lines in handwritten regions
             in_hw_region = any(
-                line.bbox[0] < r['bbox'][2] and line.bbox[2] > r['bbox'][0] and
-                line.bbox[1] < r['bbox'][3] and line.bbox[3] > r['bbox'][1]
+                bboxes_intersect(line.bbox, r['bbox'])
                 for r in handwritten_regions
             )
             min_confidence = 0.15 if in_hw_region else self.TEXT_CONFIDENCE_THRESHOLD
@@ -314,9 +307,7 @@ class DocumentProcessor:
         # Check if line overlaps a Florence-2 detected handwritten region
         line_hw_region_type = None
         for region in handwritten_regions:
-            rb = region['bbox']
-            if (line.bbox[0] < rb[2] and line.bbox[2] > rb[0] and
-                line.bbox[1] < rb[3] and line.bbox[3] > rb[1]):
+            if bboxes_intersect(line.bbox, region['bbox']):
                 line_hw_region_type = region['type']
                 break
 

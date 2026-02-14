@@ -16,6 +16,9 @@ from .image import (
 from .bbox import (
     split_line_bbox_to_words,
     is_bbox_too_large,
+    bbox_overlap_ratio_of_smaller,
+    bbox_overlap_ratio_of,
+    bboxes_intersect,
 )
 from .classification import (
     classify_document_type,
@@ -38,6 +41,9 @@ __all__ = [
     # Bbox
     'split_line_bbox_to_words',
     'is_bbox_too_large',
+    'bbox_overlap_ratio_of_smaller',
+    'bbox_overlap_ratio_of',
+    'bboxes_intersect',
     # Classification
     'classify_document_type',
     'detect_signature_region',

@@ -45,8 +45,13 @@ def main():
         logger.error("Failed to initialize models. Ensure you have a GPU and dependencies installed.\nError: %s", e)
         return
 
-    files = [f for f in os.listdir(args.input_dir) if os.path.isfile(os.path.join(args.input_dir, f))]
-    logger.info("Found %d files in %s", len(files), args.input_dir)
+    VALID_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp', '.gif', '.webp', '.pdf'}
+    all_files = [f for f in os.listdir(args.input_dir) if os.path.isfile(os.path.join(args.input_dir, f))]
+    files = [f for f in all_files if os.path.splitext(f)[1].lower() in VALID_EXTENSIONS]
+    skipped = len(all_files) - len(files)
+    if skipped:
+        logger.info("Skipped %d non-document files (e.g. .gitkeep)", skipped)
+    logger.info("Found %d document files in %s", len(files), args.input_dir)
 
     for filename in files:
         file_path = os.path.join(args.input_dir, filename)
