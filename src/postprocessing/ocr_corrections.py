@@ -64,7 +64,39 @@ def filter_offensive_ocr_misreads(elements: List[Dict], page_image=None,
 
             if can_reverify and source_model == "surya" and element.get("bbox"):
                 bbox = element["bbox"]
-                crop = page_image.crop((bbox[0], bbox[1], bbox[2], bbox[3]))
+                if len(bbox) < 4:
+                    # Invalid bbox — fall through to regex fallback
+                    original = content
+                    content = pattern.sub(replacement, content)
+                    corrections_made.append({
+                        "pattern": pattern.pattern,
+                        "original_text": original,
+                        "action": "regex_fallback",
+                        "final_text": content,
+                    })
+                    continue
+
+                # Clamp bbox to image bounds and verify positive area
+                img_w, img_h = page_image.size
+                clamped = [
+                    max(0, bbox[0]),
+                    max(0, bbox[1]),
+                    min(img_w, bbox[2]),
+                    min(img_h, bbox[3]),
+                ]
+                if clamped[2] <= clamped[0] or clamped[3] <= clamped[1]:
+                    # Zero or negative area — fall through to regex fallback
+                    original = content
+                    content = pattern.sub(replacement, content)
+                    corrections_made.append({
+                        "pattern": pattern.pattern,
+                        "original_text": original,
+                        "action": "regex_fallback",
+                        "final_text": content,
+                    })
+                    continue
+
+                crop = page_image.crop((clamped[0], clamped[1], clamped[2], clamped[3]))
                 reocr_text, reocr_conf = handwriting_recognizer.recognize(crop)
                 reocr_text = _clean_trocr_trailing_period(reocr_text)
 
@@ -222,8 +254,6 @@ def apply_ocr_corrections(text: str, page_context: set = None) -> str:
                     corrected_parts.append(part_corrected)
                 corrected_words.append(sep.join(corrected_parts) + suffix)
                 break
-        else:
-            pass
 
         # If we handled a compound word above, skip normal processing
         if '/' in stripped or '-' in stripped:
@@ -278,7 +308,3 @@ def apply_multi_word_ocr_corrections(text: str, page_context: set = None) -> str
                 text_lower = text.lower()
 
     return text
-
-
-# Backwards-compatible alias (renamed from apply_ocr_corrections_handwritten)
-apply_ocr_corrections_handwritten = apply_ocr_corrections

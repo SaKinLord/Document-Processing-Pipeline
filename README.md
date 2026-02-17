@@ -21,7 +21,6 @@ A local pipeline for extracting structured data from complex, multi-format docum
     *   Signature text replacement and garbage filtering
     *   Structural table validation and heuristic borderless table promotion
     *   Phone number normalization and date validation
-    *   Domain-specific spell correction
     *   Rotated margin text filtering (vertical Bates numbers)
 *   **Robust Pre-processing:** Adaptive denoising and deskewing via OpenCV with resolution-adaptive parameters
 
@@ -32,8 +31,8 @@ Based on regression testing with 32 ground truth documents (typed, handwritten, 
 | Metric | Value |
 |--------|-------|
 | Regression Tests | **30/32 passing** |
-| Average Flex WER | **~12.1%** |
-| Average Flex CER | **~8.3%** |
+| Average Flex WER | **~11.6%** |
+| Average Flex CER | **~8.2%** |
 
 Flexible evaluation ignores punctuation and formatting differences. Pass/fail is determined by flex CER.
 
@@ -87,7 +86,7 @@ Flexible evaluation ignores punctuation and formatting differences. Pass/fail is
        LayoutLMv3 + Table Transformer + Florence-2 OD
                      |
                      v
-             POST-PROCESSING (17 stages)
+             POST-PROCESSING (18 stages)
                      |
                      v
                JSON OUTPUT
@@ -95,7 +94,7 @@ Flexible evaluation ignores punctuation and formatting differences. Pass/fail is
 
 ### Post-Processing Pipeline
 
-The post-processing pipeline in `postprocess_output()` applies 17 sequential stages:
+The post-processing pipeline in `postprocess_output()` applies 18 sequential stages:
 
 | # | Stage | Description |
 |---|-------|-------------|
@@ -106,16 +105,17 @@ The post-processing pipeline in `postprocess_output()` applies 17 sequential sta
 | 5 | Deduplicate layout regions | Remove duplicate regions by bbox |
 | 6 | Score hallucinations | 7-signal scoring; remove >= 0.50, flag > 0.30 |
 | 7 | Filter rotated margin text | Remove vertical Bates numbers at page edges |
-| 8 | Filter offensive misreads | Regex-based reputational-risk corrections with audit trail |
+| 8 | Filter offensive misreads | Cross-model re-verification with TrOCR tiebreaker and audit trail |
 | 9 | Clean text content | Whitespace normalization, Unicode fixes |
-| 10 | Repair parentheses | Fix Surya's `BRANDS)` -> `BRAND(S)` pattern |
-| 11 | OCR corrections | Context-aware single-word fixes with slash/hyphen splitting |
-| 12 | Multi-word corrections | Proper noun phrase replacements (e.g., `HAVENS GERMAN` -> `HAGENS BERMAN`) |
-| 13 | Replace signature text | Pattern-matched signature labels -> `(signature)` |
-| 14 | Filter signature garbage | Remove single-word text overlapping >50% with signature bboxes |
-| 15 | Remove duplicate words | Fix TrOCR beam search artifacts (`straight straight` -> `straight`) |
-| 16 | Normalize phone numbers | Extract and format to `(XXX) XXX-XXXX` with type detection |
-| 17 | Classification refinement | Detect fax/form indicators in text to refine document type |
+| 10 | Strip TrOCR trailing periods | Remove spurious periods from TrOCR output (typed/mixed docs only, abbreviation-safe) |
+| 11 | Repair parentheses | Fix Surya's `BRANDS)` -> `BRAND(S)` pattern |
+| 12 | OCR corrections | Context-aware single-word fixes with slash/hyphen splitting |
+| 13 | Multi-word corrections | Proper noun phrase replacements (e.g., `HAVENS GERMAN` -> `HAGENS BERMAN`) |
+| 14 | Replace signature text | Pattern-matched signature labels -> `(signature)` |
+| 15 | Filter signature garbage | Remove single-word text overlapping >50% with signature bboxes |
+| 16 | Remove duplicate words | Fix TrOCR beam search artifacts (`straight straight` -> `straight`) |
+| 17 | Normalize phone numbers | Format phone numbers to `(xxx) xxx-xxxx`; detect fax vs phone |
+| 18 | Classification refinement | Detect misclassified typed documents via post-hoc signals |
 
 ### Enhanced Document Classification
 
@@ -320,10 +320,19 @@ Document-Processing-Pipeline/
 ├── requirements.txt
 ├── src/
 │   ├── processing_pipeline.py       # DocumentProcessor: model loading, per-page OCR routing
-│   ├── postprocessing.py            # 17-stage post-processing pipeline (~2400 lines)
-│   ├── utils.py                     # Classification, preprocessing, spell correction, bbox utils
-│   ├── resources/
-│   │   └── domain_dictionary.txt    # Domain vocabulary (legal, pharma terms)
+│   ├── postprocessing/              # 18-stage post-processing pipeline (modular package)
+│   │   ├── pipeline.py              # Orchestrator: postprocess_output() entry point
+│   │   ├── hallucination.py         # 7-signal hallucination scoring and removal
+│   │   ├── ocr_corrections.py       # Single-word, multi-word, offensive, and prefix corrections
+│   │   ├── normalization.py         # Underscore normalization, text cleaning, parenthesis repair
+│   │   ├── signatures.py            # Signature text replacement and garbage filtering
+│   │   ├── table_validation.py      # Table structure scoring and heuristic promotion
+│   │   └── phone_date.py            # Phone number normalization and date validation
+│   ├── utils/                       # Shared utilities (modular package)
+│   │   ├── classification.py        # 8-feature document type classifier
+│   │   ├── image.py                 # Pre-processing: denoising, deskewing, resizing
+│   │   ├── bbox.py                  # Bounding box overlap and intersection utilities
+│   │   └── text.py                  # Text row clustering for reading order
 │   └── models/
 │       ├── handwriting.py           # TrOCR wrapper (beam search, pooler disabled)
 │       ├── table.py                 # Table Transformer (detection + structure)
@@ -358,7 +367,6 @@ All models load onto GPU if available, falling back to CPU.
 *   `opencv-python-headless`
 *   `scikit-learn`
 *   `langdetect`
-*   `pyspellchecker`
 *   `pypdfium2`
 *   `accelerate`
 *   `einops`, `timm`, `scipy`

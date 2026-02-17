@@ -39,7 +39,6 @@ from .table_validation import (
 from .ocr_corrections import (
     filter_offensive_ocr_misreads,
     apply_ocr_corrections,
-    apply_ocr_corrections_handwritten,  # backwards-compatible alias
     apply_multi_word_ocr_corrections,
     OFFENSIVE_OCR_CORRECTIONS,
     OCR_CONFUSION_CORRECTIONS,
@@ -61,8 +60,6 @@ from .signatures import (
     filter_signature_overlap_garbage,
     detect_typed_document_indicators,
 )
-from .helpers import bbox_overlap
-
 __all__ = [
     # Pipeline
     'postprocess_output',
@@ -98,7 +95,6 @@ __all__ = [
     # OCR corrections
     'filter_offensive_ocr_misreads',
     'apply_ocr_corrections',
-    'apply_ocr_corrections_handwritten',  # backwards-compatible alias
     'apply_multi_word_ocr_corrections',
     'OFFENSIVE_OCR_CORRECTIONS',
     'OCR_CONFUSION_CORRECTIONS',
@@ -117,6 +113,4 @@ __all__ = [
     'replace_signature_text',
     'filter_signature_overlap_garbage',
     'detect_typed_document_indicators',
-    # Helpers
-    'bbox_overlap',
 ]

@@ -13,7 +13,7 @@ from langdetect import detect, LangDetectException
 from src.utils import (
     load_image, convert_pdf_to_images, crop_image, pad_bbox,
     denoise_image, deskew_image, cluster_text_rows, is_bbox_too_large,
-    SpellCorrector, classify_document_type, detect_signature_region,
+    classify_document_type, detect_signature_region,
     split_line_bbox_to_words,
 )
 from src.utils.bbox import bbox_overlap_ratio_of, bboxes_intersect
@@ -33,10 +33,6 @@ class DocumentProcessor:
     def __init__(self, device: str = 'cuda' if torch.cuda.is_available() else 'cpu'):
         self.device = device
         logger.info("Loading models on %s...", self.device)
-
-        # Load Spell Checker
-        domain_dict_path = os.path.join(os.path.dirname(__file__), "resources", "domain_dictionary.txt")
-        self.spell_corrector = SpellCorrector(domain_dict_path=domain_dict_path)
 
         # Thresholds
         self.TEXT_CONFIDENCE_THRESHOLD = 0.4
@@ -210,9 +206,10 @@ class DocumentProcessor:
                                        sig_results['<CAPTION_TO_PHRASE_GROUNDING>']['labels']):
                     if 'signature' in label.lower():
                         signature_bboxes.append(bbox)
-            torch.cuda.empty_cache()
-        except Exception as e:
+        except (RuntimeError, ValueError) as e:
             logger.warning("Florence-2 signature detection failed: %s", e)
+        finally:
+            torch.cuda.empty_cache()
 
         # Detect handwriting bboxes
         handwriting_bboxes = []
@@ -222,9 +219,10 @@ class DocumentProcessor:
                 for bbox, label in zip(hw_results['<CAPTION_TO_PHRASE_GROUNDING>']['bboxes'],
                                        hw_results['<CAPTION_TO_PHRASE_GROUNDING>']['labels']):
                     handwriting_bboxes.append(bbox)
-            torch.cuda.empty_cache()
-        except Exception as e:
+        except (RuntimeError, ValueError) as e:
             logger.warning("Florence-2 handwriting detection failed: %s", e)
+        finally:
+            torch.cuda.empty_cache()
 
         # Build unified list with type metadata
         handwritten_regions: List[Dict[str, Any]] = []
@@ -278,18 +276,15 @@ class DocumentProcessor:
                 line, image, width, height, doc_type, doc_confidence, handwritten_regions
             )
 
-            # Apply spell correction
-            corrected_text = self.spell_corrector.correct_text(final_text)
-
             text_element = self._build_text_element(
-                corrected_text, line, source_model, signature_info, height
+                final_text, line, source_model, signature_info, height
             )
 
             text_elements.append(text_element)
-            all_text_content.append(corrected_text)
+            all_text_content.append(final_text)
 
             # Collect word-level data for LayoutLMv3
-            line_words = corrected_text.split()
+            line_words = final_text.split()
             if line_words:
                 word_bboxes = split_line_bbox_to_words(line.bbox, line_words)
                 ocr_words.extend(line_words)
@@ -416,7 +411,7 @@ class DocumentProcessor:
             if current_region:
                 page_content["elements"].append(current_region)
 
-        except Exception as e:
+        except (RuntimeError, ValueError) as e:
             logger.error("  LayoutLMv3 failed: %s", e)
 
     def _detect_tables(self, image: Image.Image,
@@ -431,7 +426,7 @@ class DocumentProcessor:
                     "bbox": table['bbox'],
                     "confidence": table['confidence']
                 })
-        except Exception as e:
+        except (RuntimeError, ValueError) as e:
             logger.error("  Table detection failed: %s", e)
 
     def _detect_visual_elements(self, image: Image.Image, width: int, height: int,

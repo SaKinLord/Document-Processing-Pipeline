@@ -25,7 +25,6 @@ from .classification import (
     detect_signature_region,
 )
 from .text import (
-    SpellCorrector,
     cluster_text_rows,
 )
 
@@ -48,6 +47,5 @@ __all__ = [
     'classify_document_type',
     'detect_signature_region',
     # Text
-    'SpellCorrector',
     'cluster_text_rows',
 ]

@@ -59,6 +59,6 @@ class HandwritingRecognizer:
                 confidence = max(0.0, min(1.0, 1.0 + log_prob / 2.5))
 
             return (generated_text, confidence)
-        except Exception as e:
+        except (RuntimeError, ValueError, OSError) as e:
             logger.error("Error in handwriting recognition: %s", e)
             return ("", 0.0)

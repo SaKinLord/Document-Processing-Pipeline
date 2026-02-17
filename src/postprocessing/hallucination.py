@@ -7,12 +7,13 @@ rotated margin text fragments, and other OCR artifacts.
 
 import re
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
 
-def process_hallucinations(elements: List[Dict]) -> List[Dict]:
+def process_hallucinations(elements: List[Dict],
+                           page_dimensions: Optional[Tuple[int, int]] = None) -> List[Dict]:
     """
     Score each text element for hallucination likelihood using multiple signals.
     Removes high-confidence hallucinations, flags uncertain ones.
@@ -28,6 +29,9 @@ def process_hallucinations(elements: List[Dict]) -> List[Dict]:
 
     Args:
         elements: List of element dictionaries
+        page_dimensions: Optional (width, height) from the source image.
+                         When provided, uses max(bbox_estimated, actual) per axis
+                         so that bboxes not spanning the full page still work.
 
     Returns:
         Processed elements with hallucinations handled
@@ -40,7 +44,11 @@ def process_hallucinations(elements: List[Dict]) -> List[Dict]:
         if len(bbox) >= 4:
             page_width = max(page_width, bbox[2])
             page_height = max(page_height, bbox[3])
-    # Fallback if no bboxes found
+    # Incorporate actual page dimensions when available
+    if page_dimensions is not None:
+        page_width = max(page_width, page_dimensions[0])
+        page_height = max(page_height, page_dimensions[1])
+    # Fallback if still unknown
     if page_width == 0:
         page_width = 612  # Standard letter width in points
     if page_height == 0:
@@ -87,7 +95,8 @@ def process_hallucinations(elements: List[Dict]) -> List[Dict]:
     return processed
 
 
-def filter_rotated_margin_text(elements: List[Dict]) -> List[Dict]:
+def filter_rotated_margin_text(elements: List[Dict],
+                               page_dimensions: Optional[Tuple[int, int]] = None) -> List[Dict]:
     """
     Remove text fragments from rotated margin text (e.g., vertical Bates numbers).
 
@@ -102,6 +111,7 @@ def filter_rotated_margin_text(elements: List[Dict]) -> List[Dict]:
 
     Args:
         elements: List of element dictionaries
+        page_dimensions: Optional (width, height) from the source image
 
     Returns:
         Filtered elements with rotated margin fragments removed
@@ -112,6 +122,9 @@ def filter_rotated_margin_text(elements: List[Dict]) -> List[Dict]:
         bbox = element.get("bbox", [])
         if len(bbox) >= 4:
             page_width = max(page_width, bbox[2])
+    # Incorporate actual page width when available
+    if page_dimensions is not None:
+        page_width = max(page_width, page_dimensions[0])
     if page_width == 0:
         return elements  # Can't determine margins without bboxes
 

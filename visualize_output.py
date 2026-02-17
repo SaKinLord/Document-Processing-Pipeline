@@ -1,4 +1,5 @@
 import os
+import sys
 import json
 import argparse
 from PIL import Image, ImageDraw, ImageFont
@@ -26,18 +27,29 @@ HALLUCINATION_COLOR = (255, 50, 50)  # red
 
 def _get_font(size=12):
     """Try to load a readable font, fall back to PIL default."""
-    candidates = [
-        "C:/Windows/Fonts/consola.ttf",
-        "C:/Windows/Fonts/arial.ttf",
-        "C:/Windows/Fonts/cour.ttf",
-        "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-        "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-    ]
+    if sys.platform == "win32":
+        candidates = [
+            "C:/Windows/Fonts/consola.ttf",
+            "C:/Windows/Fonts/arial.ttf",
+            "C:/Windows/Fonts/cour.ttf",
+        ]
+    elif sys.platform == "darwin":
+        candidates = [
+            "/System/Library/Fonts/Menlo.ttc",
+            "/System/Library/Fonts/Helvetica.ttc",
+            "/Library/Fonts/Arial.ttf",
+        ]
+    else:  # Linux / Colab
+        candidates = [
+            "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
+            "/usr/share/fonts/truetype/freefont/FreeMono.ttf",
+        ]
     for path in candidates:
         if os.path.exists(path):
             try:
                 return ImageFont.truetype(path, size)
-            except Exception:
+            except (OSError, IOError):
                 continue
     return ImageFont.load_default()
 
@@ -114,7 +126,7 @@ def visualize_document(image_path, json_path, output_path,
     """Visualize a single document with detailed annotations."""
     try:
         img = Image.open(image_path).convert("RGBA")
-    except Exception as e:
+    except (OSError, IOError) as e:
         print(f"Error loading image {os.path.basename(image_path)}: {e}")
         return
 
@@ -256,7 +268,7 @@ def visualize_bboxes(input_dir, json_dir, output_dir,
                 show_content=show_content,
                 show_confidence=show_confidence,
             )
-        except Exception as e:
+        except (OSError, IOError, ValueError, KeyError) as e:
             print(f"Error processing {filename}: {e}")
 
     print(f"Visualization complete. Check {output_dir}")

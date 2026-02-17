@@ -5,7 +5,7 @@ Coordinates all post-processing steps in the correct order.
 """
 
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, List, Optional, Tuple
 
 from .normalization import (
     normalize_underscore_fields,
@@ -31,8 +31,6 @@ from .signatures import (
     filter_signature_overlap_garbage,
     detect_typed_document_indicators,
 )
-from .helpers import bbox_overlap
-
 logger = logging.getLogger(__name__)
 
 
@@ -43,6 +41,51 @@ def _log_step(name: str, before: int, after: int) -> None:
         logger.info("  [%s] %d → %d elements (removed %d)", name, before, after, delta)
     else:
         logger.debug("  [%s] %d elements (no change)", name, before)
+
+
+def sanitize_elements(elements: List[Dict]) -> List[Dict]:
+    """Validate and coerce element fields at the pipeline boundary.
+
+    Ensures every element has the expected field types so downstream steps
+    don't need to guard against malformed input:
+    - ``type``: must be a string (default ``"unknown"``)
+    - ``content``: must be a string if present (coerced with ``str()``)
+    - ``bbox``: must be a list of 4 floats (set to ``[]`` if invalid)
+    - ``confidence``: must be a float in [0, 1] (clamped)
+    """
+    for element in elements:
+        # type
+        if not isinstance(element.get("type"), str):
+            element["type"] = "unknown"
+
+        # content
+        if "content" in element and not isinstance(element["content"], str):
+            element["content"] = str(element["content"])
+
+        # bbox
+        bbox = element.get("bbox")
+        if isinstance(bbox, (list, tuple)):
+            try:
+                if len(bbox) >= 4:
+                    element["bbox"] = [float(bbox[0]), float(bbox[1]),
+                                       float(bbox[2]), float(bbox[3])]
+                else:
+                    element["bbox"] = []
+            except (TypeError, ValueError):
+                element["bbox"] = []
+        elif bbox is not None:
+            element["bbox"] = []
+
+        # confidence
+        conf = element.get("confidence")
+        if conf is not None:
+            try:
+                conf = float(conf)
+                element["confidence"] = max(0.0, min(1.0, conf))
+            except (TypeError, ValueError):
+                element["confidence"] = 0.0
+
+    return elements
 
 
 def deduplicate_layout_regions(elements):
@@ -103,6 +146,15 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
         elements = page.get("elements", [])
         logger.info("Postprocessing page %d (%d elements)", page_idx + 1, len(elements))
 
+        # Step -1: Sanitize element fields (validate at the boundary)
+        elements = sanitize_elements(elements)
+
+        # Extract page image once (used by offensive filter + dimension derivation)
+        page_image = page_images[page_idx] if page_images and page_idx < len(page_images) else None
+        page_dims: Optional[Tuple[int, int]] = None
+        if page_image is not None:
+            page_dims = (page_image.width, page_image.height)
+
         # Step 0: Filter empty table/layout regions
         count_before = len(elements)
         elements = filter_empty_regions(elements)
@@ -130,17 +182,16 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
 
         # Step 2: Score and handle hallucinations
         count_before = len(elements)
-        elements = process_hallucinations(elements)
+        elements = process_hallucinations(elements, page_dimensions=page_dims)
         _log_step("hallucinations", count_before, len(elements))
 
         # Step 2.1: Filter rotated margin text (Bates numbers, vertical IDs)
         count_before = len(elements)
-        elements = filter_rotated_margin_text(elements)
+        elements = filter_rotated_margin_text(elements, page_dimensions=page_dims)
         _log_step("rotated_margin", count_before, len(elements))
 
         # Step 2.5: Filter offensive OCR misreads (with source image re-verification)
         count_before = len(elements)
-        page_image = page_images[page_idx] if page_images and page_idx < len(page_images) else None
         elements = filter_offensive_ocr_misreads(elements, page_image=page_image,
                                                   handwriting_recognizer=handwriting_recognizer)
         _log_step("offensive_filter", count_before, len(elements))

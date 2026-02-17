@@ -166,13 +166,20 @@ def validate_phone_number(text: str) -> dict:
     if not text:
         return result
 
+    # Collect false-positive spans (dates, ZIP+4) for per-match overlap checks
+    fp_spans = []
     for fp_pattern in FALSE_POSITIVE_PATTERNS:
-        if re.search(fp_pattern, text):
-            return result
+        for fp_match in re.finditer(fp_pattern, text):
+            fp_spans.append((fp_match.start(), fp_match.end()))
 
     for pattern in PHONE_PATTERNS:
         matches = re.finditer(pattern, text)
         for match in matches:
+            # Skip phone matches that overlap any false-positive span
+            m_start, m_end = match.start(), match.end()
+            if any(m_start < fp_end and m_end > fp_start
+                   for fp_start, fp_end in fp_spans):
+                continue
             groups = match.groups()
             if len(groups) >= 3:
                 area_code = groups[0]

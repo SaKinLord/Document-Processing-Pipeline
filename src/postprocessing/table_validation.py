@@ -8,7 +8,7 @@ and promotion of layout region clusters to table elements.
 import logging
 from typing import Dict, List, Tuple
 
-from .helpers import bbox_overlap
+from src.utils.bbox import bbox_overlap_ratio_of_smaller
 
 logger = logging.getLogger(__name__)
 
@@ -22,8 +22,30 @@ MIN_ROWS = 2             # Minimum rows to be considered a table
 MIN_TEXT_DENSITY = 0.03  # 3% minimum text coverage
 MAX_TEXT_DENSITY = 0.80  # 80% maximum (too dense = overlapping)
 MIN_STRUCTURE_SCORE = 50 # Minimum score to keep as table
-COLUMN_CLUSTER_TOLERANCE = 40  # Pixels for column clustering
-ROW_CLUSTER_TOLERANCE = 15     # Pixels for row clustering
+DEFAULT_COLUMN_CLUSTER_TOLERANCE = 40  # Pixels for column clustering at reference width
+DEFAULT_ROW_CLUSTER_TOLERANCE = 15     # Pixels for row clustering at reference width
+REFERENCE_PAGE_WIDTH = 1000            # Reference page width for tolerance scaling
+
+
+def _scaled_tolerances(elements: List[Dict]) -> Tuple[float, float]:
+    """Compute column/row clustering tolerances scaled to actual page width.
+
+    Uses the maximum x2 coordinate across all element bboxes as a proxy for
+    page width, then scales the default tolerances proportionally.
+
+    Returns:
+        (col_tolerance, row_tolerance) scaled to actual page width
+    """
+    page_width = 0
+    for element in elements:
+        bbox = element.get("bbox", [])
+        if len(bbox) >= 4:
+            page_width = max(page_width, bbox[2])
+    if page_width <= 0:
+        return DEFAULT_COLUMN_CLUSTER_TOLERANCE, DEFAULT_ROW_CLUSTER_TOLERANCE
+
+    scale = page_width / REFERENCE_PAGE_WIDTH
+    return DEFAULT_COLUMN_CLUSTER_TOLERANCE * scale, DEFAULT_ROW_CLUSTER_TOLERANCE * scale
 
 
 def filter_empty_regions(elements: List[Dict]) -> List[Dict]:
@@ -64,7 +86,7 @@ def filter_empty_regions(elements: List[Dict]) -> List[Dict]:
 
         has_text_overlap = False
         for text_bbox in text_bboxes:
-            if text_bbox and bbox_overlap(region_bbox, text_bbox) >= MIN_OVERLAP_RATIO:
+            if text_bbox and bbox_overlap_ratio_of_smaller(region_bbox, text_bbox) >= MIN_OVERLAP_RATIO:
                 has_text_overlap = True
                 break
 
@@ -117,7 +139,8 @@ def cluster_positions(positions: List[float], tolerance: float) -> List[List[flo
     return clusters
 
 
-def detect_column_alignment(table_bbox: List[float], text_bboxes: List[List[float]]) -> Tuple[int, List[float]]:
+def detect_column_alignment(table_bbox: List[float], text_bboxes: List[List[float]],
+                            col_tolerance: float = DEFAULT_COLUMN_CLUSTER_TOLERANCE) -> Tuple[int, List[float]]:
     """
     Detect column structure by clustering text X-positions.
     """
@@ -129,13 +152,14 @@ def detect_column_alignment(table_bbox: List[float], text_bboxes: List[List[floa
     if not x_positions:
         return 0, []
 
-    clusters = cluster_positions(x_positions, COLUMN_CLUSTER_TOLERANCE)
+    clusters = cluster_positions(x_positions, col_tolerance)
     column_centers = [sum(c) / len(c) for c in clusters]
 
     return len(clusters), column_centers
 
 
-def detect_row_alignment(table_bbox: List[float], text_bboxes: List[List[float]]) -> Tuple[int, List[float]]:
+def detect_row_alignment(table_bbox: List[float], text_bboxes: List[List[float]],
+                         row_tolerance: float = DEFAULT_ROW_CLUSTER_TOLERANCE) -> Tuple[int, List[float]]:
     """
     Detect row structure by clustering text Y-positions.
     """
@@ -147,7 +171,7 @@ def detect_row_alignment(table_bbox: List[float], text_bboxes: List[List[float]]
     if not y_positions:
         return 0, []
 
-    clusters = cluster_positions(y_positions, ROW_CLUSTER_TOLERANCE)
+    clusters = cluster_positions(y_positions, row_tolerance)
     row_centers = [sum(c) / len(c) for c in clusters]
 
     return len(clusters), row_centers
@@ -155,7 +179,9 @@ def detect_row_alignment(table_bbox: List[float], text_bboxes: List[List[float]]
 
 def check_grid_coverage(text_bboxes: List[List[float]],
                         column_centers: List[float],
-                        row_centers: List[float]) -> float:
+                        row_centers: List[float],
+                        col_tolerance: float = DEFAULT_COLUMN_CLUSTER_TOLERANCE,
+                        row_tolerance: float = DEFAULT_ROW_CLUSTER_TOLERANCE) -> float:
     """
     Check how well text elements cover the grid (columns x rows).
     """
@@ -176,7 +202,7 @@ def check_grid_coverage(text_bboxes: List[List[float]],
         min_col_dist = float('inf')
         for i, col_x in enumerate(column_centers):
             dist = abs(text_x - col_x)
-            if dist < min_col_dist and dist < COLUMN_CLUSTER_TOLERANCE * 2:
+            if dist < min_col_dist and dist < col_tolerance * 2:
                 min_col_dist = dist
                 col_idx = i
 
@@ -184,7 +210,7 @@ def check_grid_coverage(text_bboxes: List[List[float]],
         min_row_dist = float('inf')
         for i, row_y in enumerate(row_centers):
             dist = abs(text_y - row_y)
-            if dist < min_row_dist and dist < ROW_CLUSTER_TOLERANCE * 2:
+            if dist < min_row_dist and dist < row_tolerance * 2:
                 min_row_dist = dist
                 row_idx = i
 
@@ -254,7 +280,9 @@ def calculate_structure_score(
 
 def validate_table_structure(
     table_element: Dict,
-    text_elements: List[Dict]
+    text_elements: List[Dict],
+    col_tolerance: float = DEFAULT_COLUMN_CLUSTER_TOLERANCE,
+    row_tolerance: float = DEFAULT_ROW_CLUSTER_TOLERANCE,
 ) -> Tuple[bool, float, List[str]]:
     """
     Validate if a detected table has true tabular structure.
@@ -269,16 +297,17 @@ def validate_table_structure(
     overlapping_texts = []
     for text_elem in text_elements:
         text_bbox = text_elem.get("bbox", [])
-        if text_bbox and bbox_overlap(table_bbox, text_bbox) >= 0.3:
+        if text_bbox and bbox_overlap_ratio_of_smaller(table_bbox, text_bbox) >= 0.3:
             overlapping_texts.append(text_bbox)
 
     if not overlapping_texts:
         return False, 0.0, ["no_text_overlap"]
 
     density = calculate_text_density(table_bbox, overlapping_texts)
-    num_cols, col_centers = detect_column_alignment(table_bbox, overlapping_texts)
-    num_rows, row_centers = detect_row_alignment(table_bbox, overlapping_texts)
-    grid_coverage = check_grid_coverage(overlapping_texts, col_centers, row_centers)
+    num_cols, col_centers = detect_column_alignment(table_bbox, overlapping_texts, col_tolerance)
+    num_rows, row_centers = detect_row_alignment(table_bbox, overlapping_texts, row_tolerance)
+    grid_coverage = check_grid_coverage(overlapping_texts, col_centers, row_centers,
+                                        col_tolerance, row_tolerance)
 
     score, signals = calculate_structure_score(
         density, num_cols, num_rows, grid_coverage, confidence
@@ -294,6 +323,7 @@ def filter_invalid_tables(elements: List[Dict]) -> List[Dict]:
     Filter out tables that don't have valid tabular structure.
     """
     text_elements = [e for e in elements if e.get("type") == "text"]
+    col_tol, row_tol = _scaled_tolerances(elements)
 
     filtered = []
 
@@ -302,7 +332,9 @@ def filter_invalid_tables(elements: List[Dict]) -> List[Dict]:
             filtered.append(element)
             continue
 
-        is_valid, score, signals = validate_table_structure(element, text_elements)
+        is_valid, score, signals = validate_table_structure(
+            element, text_elements, col_tol, row_tol
+        )
 
         if is_valid:
             element["structure_score"] = round(score, 1)
@@ -403,7 +435,9 @@ def calculate_cluster_bbox(cluster: List[Dict]) -> List[float]:
 
 def validate_cluster_as_table(
     cluster: List[Dict],
-    text_elements: List[Dict]
+    text_elements: List[Dict],
+    col_tolerance: float = DEFAULT_COLUMN_CLUSTER_TOLERANCE,
+    row_tolerance: float = DEFAULT_ROW_CLUSTER_TOLERANCE,
 ) -> Tuple[bool, float, List[str]]:
     """
     Validate if a cluster of layout regions has valid table structure.
@@ -415,16 +449,17 @@ def validate_cluster_as_table(
     overlapping_texts = []
     for text_elem in text_elements:
         text_bbox = text_elem.get("bbox", [])
-        if text_bbox and bbox_overlap(cluster_bbox, text_bbox) >= 0.3:
+        if text_bbox and bbox_overlap_ratio_of_smaller(cluster_bbox, text_bbox) >= 0.3:
             overlapping_texts.append(text_bbox)
 
     if len(overlapping_texts) < 6:
         return False, 0.0, ["insufficient_text"]
 
     density = calculate_text_density(cluster_bbox, overlapping_texts)
-    num_cols, col_centers = detect_column_alignment(cluster_bbox, overlapping_texts)
-    num_rows, row_centers = detect_row_alignment(cluster_bbox, overlapping_texts)
-    grid_coverage = check_grid_coverage(overlapping_texts, col_centers, row_centers)
+    num_cols, col_centers = detect_column_alignment(cluster_bbox, overlapping_texts, col_tolerance)
+    num_rows, row_centers = detect_row_alignment(cluster_bbox, overlapping_texts, row_tolerance)
+    grid_coverage = check_grid_coverage(overlapping_texts, col_centers, row_centers,
+                                        col_tolerance, row_tolerance)
 
     score, signals = calculate_structure_score(
         density, num_cols, num_rows, grid_coverage, 0.80
@@ -452,14 +487,15 @@ def overlaps_existing_table(cluster_bbox: List[float], tables: List[Dict]) -> bo
         if len(table_bbox) != 4:
             continue
 
-        overlap = bbox_overlap(cluster_bbox, table_bbox)
+        overlap = bbox_overlap_ratio_of_smaller(cluster_bbox, table_bbox)
         if overlap >= TABLE_OVERLAP_THRESHOLD:
             return True
 
     return False
 
 
-def _analyze_row_structure(row_texts: List[List[float]], bbox_width: float) -> dict:
+def _analyze_row_structure(row_texts: List[List[float]], bbox_width: float,
+                           col_tolerance: float = DEFAULT_COLUMN_CLUSTER_TOLERANCE) -> dict:
     """
     Analyze a row's structural properties.
     """
@@ -474,7 +510,7 @@ def _analyze_row_structure(row_texts: List[List[float]], bbox_width: float) -> d
         return result
 
     x_positions = [bbox[0] for bbox in row_texts]
-    column_clusters = cluster_positions(x_positions, COLUMN_CLUSTER_TOLERANCE)
+    column_clusters = cluster_positions(x_positions, col_tolerance)
     result["num_cols"] = len(column_clusters)
 
     if len(column_clusters) >= 2:
@@ -493,7 +529,8 @@ def _analyze_row_structure(row_texts: List[List[float]], bbox_width: float) -> d
 
 def refine_table_top_boundary(
     cluster_bbox: List[float],
-    text_elements: List[Dict]
+    text_elements: List[Dict],
+    col_tolerance: float = DEFAULT_COLUMN_CLUSTER_TOLERANCE,
 ) -> List[float]:
     """
     Refine the top boundary of a promoted table by trimming header rows
@@ -511,7 +548,7 @@ def refine_table_top_boundary(
     overlapping_texts = []
     for text_elem in text_elements:
         text_bbox = text_elem.get("bbox", [])
-        if text_bbox and bbox_overlap(cluster_bbox, text_bbox) >= 0.3:
+        if text_bbox and bbox_overlap_ratio_of_smaller(cluster_bbox, text_bbox) >= 0.3:
             overlapping_texts.append(text_bbox)
 
     if len(overlapping_texts) < 6:
@@ -536,7 +573,7 @@ def refine_table_top_boundary(
     if current_row:
         rows.append(current_row)
 
-    row_analyses = [_analyze_row_structure(row, bbox_width) for row in rows]
+    row_analyses = [_analyze_row_structure(row, bbox_width, col_tolerance) for row in rows]
 
     anchor_y = y1
 
@@ -572,6 +609,7 @@ def promote_layout_regions_to_tables(elements: List[Dict]) -> List[Dict]:
     """
     existing_tables = [e for e in elements if e.get("type") == "table"]
     text_elements = [e for e in elements if e.get("type") == "text"]
+    col_tol, row_tol = _scaled_tolerances(elements)
 
     clusters = cluster_layout_regions_vertically(elements)
 
@@ -586,10 +624,12 @@ def promote_layout_regions_to_tables(elements: List[Dict]) -> List[Dict]:
         if overlaps_existing_table(cluster_bbox, existing_tables):
             continue
 
-        is_valid, score, signals = validate_cluster_as_table(cluster, text_elements)
+        is_valid, score, signals = validate_cluster_as_table(
+            cluster, text_elements, col_tol, row_tol
+        )
 
         if is_valid:
-            refined_bbox = refine_table_top_boundary(cluster_bbox, text_elements)
+            refined_bbox = refine_table_top_boundary(cluster_bbox, text_elements, col_tol)
 
             synthetic_table = {
                 "type": "table",

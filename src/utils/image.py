@@ -17,7 +17,7 @@ def load_image(image_path):
     try:
         image = Image.open(image_path).convert("RGB")
         return image
-    except Exception as e:
+    except (OSError, ValueError) as e:
         logger.error("Error loading image %s: %s", image_path, e)
         return None
 
@@ -32,7 +32,7 @@ def convert_pdf_to_images(pdf_path, dpi=200):
             bitmap = page.render(scale=dpi/72)
             pil_image = bitmap.to_pil()
             images.append(pil_image.convert("RGB"))
-    except Exception as e:
+    except (OSError, RuntimeError, ValueError) as e:
         logger.error("Error converting PDF %s: %s", pdf_path, e)
     return images
 
@@ -84,8 +84,9 @@ def estimate_noise(image_np):
         diff = cv2.absdiff(gray, median)
         score = np.mean(diff)
         return score
-    except Exception:
-        return 999.0
+    except (cv2.error, ValueError) as e:
+        logger.debug("Noise estimation failed: %s", e)
+        return None
 
 
 def denoise_image(image):
@@ -97,14 +98,14 @@ def denoise_image(image):
         img_np = np.array(image)
 
         noise_score = estimate_noise(img_np)
-        if noise_score < 0.8:
+        if noise_score is None or noise_score < 0.8:
             return image
 
         img_bgr = cv2.cvtColor(img_np, cv2.COLOR_RGB2BGR)
         denoised_bgr = cv2.fastNlMeansDenoisingColored(img_bgr, None, 10, 10, 7, 21)
         denoised_rgb = cv2.cvtColor(denoised_bgr, cv2.COLOR_BGR2RGB)
         return Image.fromarray(denoised_rgb)
-    except Exception as e:
+    except (cv2.error, ValueError) as e:
         logger.error("Error denoising image: %s", e)
         return image
 
@@ -173,6 +174,6 @@ def deskew_image(image, angle_threshold=0.5, max_angle=15.0):
 
         return Image.fromarray(rotated)
 
-    except Exception as e:
+    except (cv2.error, ValueError) as e:
         logger.warning("Deskew failed: %s", e)
         return image

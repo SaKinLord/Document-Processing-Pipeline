@@ -11,6 +11,5 @@ einops
 timm
 scipy
 langdetect>=1.0.0
-pyspellchecker>=0.7.0
 transformers>=4.38.0,<5.0.0  # Pin to <5.0 for Florence-2 compatibility
 # detectron2 # Left commented as it requires specific build steps on Windows
