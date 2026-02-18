@@ -224,24 +224,36 @@ class DocumentProcessor:
         finally:
             torch.cuda.empty_cache()
 
-        # Build unified list with type metadata
+        # Build unified list: signatures first (higher routing priority), then
+        # handwriting regions independently.  Previous logic deduped handwriting
+        # bboxes *against* signature bboxes, but Florence-2's "handwritten text"
+        # query returns bboxes that nearly always overlap its "signature" bboxes
+        # (signatures are handwritten), so every handwriting region was eliminated
+        # and per-line routing never activated.  Now we keep both types and only
+        # self-dedup handwriting bboxes against each other to remove redundant
+        # detections.  The routing in _route_line iterates signatures first, so
+        # lines overlapping both still get the strict 0.90 TrOCR gate.
         handwritten_regions: List[Dict[str, Any]] = []
         for sb in signature_bboxes:
             handwritten_regions.append({'bbox': sb, 'type': 'signature'})
 
+        # Self-dedup handwriting bboxes only (remove redundant detections)
+        deduped_hw: List[List[float]] = []
         for hb in handwriting_bboxes:
-            overlaps_signature = False
-            for sb in signature_bboxes:
-                if bbox_overlap_ratio_of(hb, sb, reference_bbox=hb) > 0.50:
-                    overlaps_signature = True
+            redundant = False
+            for kept in deduped_hw:
+                if bbox_overlap_ratio_of(hb, kept, reference_bbox=hb) > 0.50:
+                    redundant = True
                     break
-            if not overlaps_signature:
-                handwritten_regions.append({'bbox': hb, 'type': 'handwriting'})
+            if not redundant:
+                deduped_hw.append(hb)
+
+        for hb in deduped_hw:
+            handwritten_regions.append({'bbox': hb, 'type': 'handwriting'})
 
         if handwriting_bboxes:
-            hw_count = len([r for r in handwritten_regions if r['type'] == 'handwriting'])
-            logger.info("  Florence-2 handwriting regions: %d detected, %d after dedup",
-                        len(handwriting_bboxes), hw_count)
+            logger.info("  Florence-2 handwriting regions: %d detected, %d after self-dedup",
+                        len(handwriting_bboxes), len(deduped_hw))
         if signature_bboxes:
             logger.info("  Florence-2 signature regions: %d detected", len(signature_bboxes))
 
