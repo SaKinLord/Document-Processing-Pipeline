@@ -5,7 +5,7 @@ A local pipeline for extracting structured data from complex, multi-format docum
 ## Key Features
 
 *   **Intelligent 8-Feature Classification:** Automatically detects document type using stroke width variance, line regularity, contour angle variance, edge density, form structure detection, character uniformity, signature region isolation, and fax/letterhead header detection. Includes ruled paper handwriting detection and sparse form safeguards.
-*   **Per-Line Handwriting Routing:** Florence-2 phrase grounding detects signature and handwritten text regions before OCR. Lines overlapping these regions are routed to TrOCR ensemble regardless of page-level classification, catching handwritten fill-ins, names, and annotations on typed forms.
+*   **Per-Line Handwriting Routing:** Florence-2 phrase grounding detects signature and handwritten text regions independently before OCR. Lines overlapping these regions are forced into TrOCR ensemble regardless of page-level classification, with a strict 0.90 confidence gate for signature regions and a normal confidence gate for handwriting regions. This catches handwritten fill-ins, names, and annotations on otherwise typed pages — even when the page-level classifier misidentifies the document type.
 *   **Multi-Model Intelligence:**
     *   **Surya OCR:** High-precision text detection and recognition for typed documents
     *   **TrOCR:** Specialized handwriting recognition with beam search (4 beams), 12px bbox padding for descenders, and punctuation spacing normalization
@@ -63,7 +63,7 @@ Flexible evaluation ignores punctuation and formatting differences. Pass/fail is
                               v
                   FLORENCE-2 PHRASE GROUNDING
               Detect "signature" + "handwritten text"
-               regions BEFORE OCR (pixel bboxes)
+              regions independently (pixel bboxes)
                               |
             +-----------------+-----------------+
             v                 v                 v
@@ -76,10 +76,11 @@ Flexible evaluation ignores punctuation and formatting differences. Pass/fail is
             +--------+--------+-----------------+
                      |
                      v  (per-line override)
-         Lines in Florence-2 handwritten regions
+         Lines in Florence-2 detected regions
            -> forced ensemble regardless of page type
-         Signature overlap -> 0.90 TrOCR gate
-         Handwriting overlap -> normal gate
+         Signature region  -> 0.90 TrOCR gate
+         Handwriting region -> normal gate
+         Both overlap       -> signature gate wins
                      |
                      v
               LAYOUT ANALYSIS
@@ -380,6 +381,12 @@ All models load onto GPU if available, falling back to CPU.
 *   `pypdfium2`
 *   `accelerate`
 *   `einops`, `timm`, `scipy`
+
+## Known Limitations
+
+*   **Florence-2 bbox precision:** Florence-2 phrase grounding returns coarse bounding boxes. In mixed documents, a handwriting region may extend over adjacent typed text, causing those lines to be routed through TrOCR unnecessarily. The impact is minor (TrOCR may lowercase typed text), and the net effect is still positive for handwriting recall.
+*   **Dense form layouts:** Documents with complex grid structures (many small fields, checkboxes, and lines) produce fragmented OCR elements. The two currently failing test documents (33% and 30% flex WER) are both dense Hazleton Laboratories project sheet forms.
+*   **Classification edge cases:** Some fully handwritten documents on clean white paper with uniform line spacing are misclassified as "typed" by the 8-feature classifier. Per-line Florence-2 routing compensates for this (lines still get TrOCR), but the TrOCR trailing period strip may incorrectly remove legitimate sentence-ending periods when the page is labeled "typed."
 
 ## License
 
