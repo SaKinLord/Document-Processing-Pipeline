@@ -18,7 +18,6 @@ from .hallucination import process_hallucinations, filter_rotated_margin_text
 from .table_validation import (
     filter_empty_regions,
     filter_invalid_tables,
-    promote_layout_regions_to_tables,
     build_table_cells,
 )
 from .ocr_corrections import (
@@ -120,7 +119,6 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
     0. Filter empty table/layout regions (remove hallucinations)
     0.25. Normalize underscore fill-in fields
     0.5. Validate table structure (remove false positive tables)
-    0.6. Heuristic table promotion (detect missed borderless tables)
     1. Deduplicate layout regions
     2. Score and handle hallucinations (with margin awareness)
     2.1. Filter rotated margin text (Bates numbers, vertical IDs)
@@ -171,11 +169,6 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
         count_before = len(elements)
         elements = filter_invalid_tables(elements)
         _log_step("filter_tables", count_before, len(elements))
-
-        # Step 0.6: Heuristic table promotion (detect missed tables)
-        count_before = len(elements)
-        elements = promote_layout_regions_to_tables(elements)
-        _log_step("promote_tables", count_before, len(elements))
 
         # Step 1: Deduplicate layout regions
         count_before = len(elements)

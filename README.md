@@ -19,7 +19,7 @@ A local pipeline for extracting structured data from complex, multi-format docum
     *   Parenthesis repair for Surya artifacts
     *   Slash/hyphen compound word splitting before corrections
     *   Signature text replacement and garbage filtering
-    *   Structural table validation and heuristic borderless table promotion
+    *   Structural table validation and cell-level content extraction
     *   Phone number normalization and date validation
     *   Rotated margin text filtering (vertical Bates numbers)
 *   **Robust Pre-processing:** Adaptive denoising and deskewing via OpenCV with resolution-adaptive parameters
@@ -87,7 +87,7 @@ Flexible evaluation ignores punctuation and formatting differences. Pass/fail is
        LayoutLMv3 + Table Transformer + Florence-2 OD
                      |
                      v
-             POST-PROCESSING (19 stages)
+             POST-PROCESSING (18 stages)
                      |
                      v
                JSON OUTPUT
@@ -95,28 +95,27 @@ Flexible evaluation ignores punctuation and formatting differences. Pass/fail is
 
 ### Post-Processing Pipeline
 
-The post-processing pipeline in `postprocess_output()` applies 19 sequential stages:
+The post-processing pipeline in `postprocess_output()` applies 18 sequential stages:
 
 | # | Stage | Description |
 |---|-------|-------------|
 | 1 | Filter empty regions | Remove tables/layout regions with <30% text overlap |
 | 2 | Normalize underscores | Standardize form fields (`Name:____` -> `Name: ___`) |
 | 3 | Validate table structure | Score tables 0-100; remove if score < 50 |
-| 4 | Promote borderless tables | Detect missed tables via layout region clustering |
-| 5 | Deduplicate layout regions | Remove duplicate regions by bbox |
-| 6 | Score hallucinations | 7-signal scoring; remove >= 0.50, flag > 0.30 |
-| 7 | Filter rotated margin text | Remove vertical Bates numbers at page edges |
-| 8 | Filter offensive misreads | Cross-model re-verification with TrOCR tiebreaker and audit trail |
-| 9 | Clean text content | Whitespace normalization, Unicode fixes |
-| 10 | Strip TrOCR trailing periods | Remove spurious periods from TrOCR output (typed/mixed docs only, abbreviation-safe) |
-| 11 | Repair parentheses | Fix Surya's `BRANDS)` -> `BRAND(S)` pattern |
-| 12 | OCR corrections | Context-aware single-word fixes with slash/hyphen splitting |
-| 13 | Multi-word corrections | Proper noun phrase replacements (e.g., `HAVENS GERMAN` -> `HAGENS BERMAN`) |
-| 14 | Replace signature text | Pattern-matched signature labels -> `(signature)` |
-| 15 | Filter signature garbage | Remove single-word text overlapping >50% with signature bboxes |
-| 16 | Remove duplicate words | Fix TrOCR beam search artifacts (`straight straight` -> `straight`) |
-| 17 | Extract table cells | Assign OCR text to Table Transformer's row/column grid |
-| 18 | Normalize phone numbers | Format phone numbers to `(xxx) xxx-xxxx`; detect fax vs phone |
+| 4 | Deduplicate layout regions | Remove duplicate regions by bbox |
+| 5 | Score hallucinations | 7-signal scoring; remove >= 0.50, flag > 0.30 |
+| 6 | Filter rotated margin text | Remove vertical Bates numbers at page edges |
+| 7 | Filter offensive misreads | Cross-model re-verification with TrOCR tiebreaker and audit trail |
+| 8 | Clean text content | Whitespace normalization, Unicode fixes |
+| 9 | Strip TrOCR trailing periods | Remove spurious periods from TrOCR output (typed/mixed docs only, abbreviation-safe) |
+| 10 | Repair parentheses | Fix Surya's `BRANDS)` -> `BRAND(S)` pattern |
+| 11 | OCR corrections | Context-aware single-word fixes with slash/hyphen splitting |
+| 12 | Multi-word corrections | Proper noun phrase replacements (e.g., `HAVENS GERMAN` -> `HAGENS BERMAN`) |
+| 13 | Replace signature text | Pattern-matched signature labels -> `(signature)` |
+| 14 | Filter signature garbage | Remove single-word text overlapping >50% with signature bboxes |
+| 15 | Remove duplicate words | Fix TrOCR beam search artifacts (`straight straight` -> `straight`) |
+| 16 | Extract table cells | Assign OCR text to Table Transformer's row/column grid |
+| 17 | Normalize phone numbers | Format phone numbers to `(xxx) xxx-xxxx`; detect fax vs phone |
 | 19 | Classification refinement | Detect misclassified typed documents via post-hoc signals |
 
 ### Enhanced Document Classification
@@ -168,15 +167,6 @@ Detected tables are validated for true tabular structure:
 | Confidence | 5 | Model confidence >= 95% |
 
 Tables with structure_score < 50 are removed.
-
-### Heuristic Table Promotion
-
-Detects borderless tables missed by the Table Transformer by analyzing clusters of layout regions:
-
-- Clusters vertically adjacent layout regions (max 20px gap)
-- Requires: 15+ regions, 4+ columns, 5+ rows, 55% grid coverage, score >= 90
-- Refines top boundary via vertical continuity rule to trim non-tabular headers
-- Promoted tables tagged with `source: "heuristic_promotion"` and `confidence: 0.8`
 
 ### Phone Number Normalization
 
@@ -320,7 +310,7 @@ For each input file, a JSON is generated:
 
 **Text element fields:** `content`, `bbox`, `confidence` (Surya's), `source_model` (`surya`/`trocr`), `row_id`, optional `in_signature_region`, `hallucination_score`, `hallucination_signals`, `normalized_phone`, `phone_type`, `date_validation`, `offensive_ocr_corrected`
 
-**Table element fields:** `bbox`, `confidence`, `structure_score`, `structure_signals`, optional `num_rows`, `num_columns`, `cells` (array of `{row, col, bbox, content, is_header}`). Tables without extractable structure (e.g., heuristic-promoted) omit `cells`.
+**Table element fields:** `bbox`, `confidence`, `structure_score`, `structure_signals`, optional `num_rows`, `num_columns`, `cells` (array of `{row, col, bbox, content, is_header}`).
 
 ## Project Structure
 
@@ -331,13 +321,13 @@ Document-Processing-Pipeline/
 ├── requirements.txt
 ├── src/
 │   ├── processing_pipeline.py       # DocumentProcessor: model loading, per-page OCR routing
-│   ├── postprocessing/              # 19-stage post-processing pipeline (modular package)
+│   ├── postprocessing/              # 18-stage post-processing pipeline (modular package)
 │   │   ├── pipeline.py              # Orchestrator: postprocess_output() entry point
 │   │   ├── hallucination.py         # 7-signal hallucination scoring and removal
 │   │   ├── ocr_corrections.py       # Single-word, multi-word, offensive, and prefix corrections
 │   │   ├── normalization.py         # Underscore normalization, text cleaning, parenthesis repair
 │   │   ├── signatures.py            # Signature text replacement and garbage filtering
-│   │   ├── table_validation.py      # Table structure scoring and heuristic promotion
+│   │   ├── table_validation.py      # Table structure scoring and cell extraction
 │   │   └── phone_date.py            # Phone number normalization and date validation
 │   ├── utils/                       # Shared utilities (modular package)
 │   │   ├── classification.py        # 8-feature document type classifier

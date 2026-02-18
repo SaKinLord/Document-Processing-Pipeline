@@ -1,8 +1,8 @@
 """
-Table validation and heuristic promotion for OCR output.
+Table validation and cell extraction for OCR output.
 
 Handles structural validation of detected tables, filtering of false positives,
-and promotion of layout region clusters to table elements.
+and extraction of cell-level content from Table Transformer structure data.
 """
 
 import logging
@@ -345,309 +345,6 @@ def filter_invalid_tables(elements: List[Dict]) -> List[Dict]:
 
 
 # ============================================================================
-# Heuristic Table Promotion (for missed borderless tables)
-# ============================================================================
-
-# Configuration for table promotion
-VERTICAL_CLUSTER_GAP = 20
-MIN_CLUSTER_REGIONS = 15
-MIN_PROMOTION_COLUMNS = 4
-MIN_PROMOTION_ROWS = 5
-MIN_PROMOTION_SCORE = 90
-MIN_GRID_COVERAGE = 0.55
-TABLE_OVERLAP_THRESHOLD = 0.40
-
-# Boundary refinement
-MIN_ANCHOR_COLUMNS = 4
-ANCHOR_ROW_HEIGHT = 18
-HIGH_DENSITY_ITEMS = 6
-MIN_CONSECUTIVE_COLS = 4
-
-
-def cluster_layout_regions_vertically(elements: List[Dict]) -> List[List[Dict]]:
-    """
-    Cluster layout_region elements by vertical proximity.
-    """
-    layout_regions = [e for e in elements if e.get("type") == "layout_region"]
-
-    if len(layout_regions) < MIN_CLUSTER_REGIONS:
-        return []
-
-    regions_with_y = []
-    for region in layout_regions:
-        bbox = region.get("bbox", [])
-        if len(bbox) >= 4:
-            y_top = bbox[1]
-            regions_with_y.append((y_top, region))
-
-    if not regions_with_y:
-        return []
-
-    regions_with_y.sort(key=lambda x: x[0])
-
-    clusters = []
-    current_cluster = [regions_with_y[0][1]]
-    current_y_bottom = regions_with_y[0][1].get("bbox", [0, 0, 0, 0])[3]
-
-    for y_top, region in regions_with_y[1:]:
-        bbox = region.get("bbox", [0, 0, 0, 0])
-
-        if y_top - current_y_bottom <= VERTICAL_CLUSTER_GAP:
-            current_cluster.append(region)
-            current_y_bottom = max(current_y_bottom, bbox[3])
-        else:
-            if len(current_cluster) >= MIN_CLUSTER_REGIONS:
-                clusters.append(current_cluster)
-            current_cluster = [region]
-            current_y_bottom = bbox[3]
-
-    if len(current_cluster) >= MIN_CLUSTER_REGIONS:
-        clusters.append(current_cluster)
-
-    return clusters
-
-
-def calculate_cluster_bbox(cluster: List[Dict]) -> List[float]:
-    """
-    Calculate combined bounding box for a cluster of regions.
-    """
-    if not cluster:
-        return []
-
-    min_x = float('inf')
-    min_y = float('inf')
-    max_x = float('-inf')
-    max_y = float('-inf')
-
-    for region in cluster:
-        bbox = region.get("bbox", [])
-        if len(bbox) >= 4:
-            min_x = min(min_x, bbox[0])
-            min_y = min(min_y, bbox[1])
-            max_x = max(max_x, bbox[2])
-            max_y = max(max_y, bbox[3])
-
-    if min_x == float('inf'):
-        return []
-
-    return [min_x, min_y, max_x, max_y]
-
-
-def validate_cluster_as_table(
-    cluster: List[Dict],
-    text_elements: List[Dict],
-    col_tolerance: float = DEFAULT_COLUMN_CLUSTER_TOLERANCE,
-    row_tolerance: float = DEFAULT_ROW_CLUSTER_TOLERANCE,
-) -> Tuple[bool, float, List[str]]:
-    """
-    Validate if a cluster of layout regions has valid table structure.
-    """
-    cluster_bbox = calculate_cluster_bbox(cluster)
-    if not cluster_bbox:
-        return False, 0.0, ["no_bbox"]
-
-    overlapping_texts = []
-    for text_elem in text_elements:
-        text_bbox = text_elem.get("bbox", [])
-        if text_bbox and bbox_overlap_ratio_of_smaller(cluster_bbox, text_bbox) >= 0.3:
-            overlapping_texts.append(text_bbox)
-
-    if len(overlapping_texts) < 6:
-        return False, 0.0, ["insufficient_text"]
-
-    density = calculate_text_density(cluster_bbox, overlapping_texts)
-    num_cols, col_centers = detect_column_alignment(cluster_bbox, overlapping_texts, col_tolerance)
-    num_rows, row_centers = detect_row_alignment(cluster_bbox, overlapping_texts, row_tolerance)
-    grid_coverage = check_grid_coverage(overlapping_texts, col_centers, row_centers,
-                                        col_tolerance, row_tolerance)
-
-    score, signals = calculate_structure_score(
-        density, num_cols, num_rows, grid_coverage, 0.80
-    )
-
-    is_valid = (
-        score >= MIN_PROMOTION_SCORE and
-        num_cols >= MIN_PROMOTION_COLUMNS and
-        num_rows >= MIN_PROMOTION_ROWS and
-        grid_coverage >= MIN_GRID_COVERAGE
-    )
-
-    return is_valid, score, signals
-
-
-def overlaps_existing_table(cluster_bbox: List[float], tables: List[Dict]) -> bool:
-    """
-    Check if cluster overlaps significantly with any existing table.
-    """
-    if not cluster_bbox or len(cluster_bbox) != 4:
-        return False
-
-    for table in tables:
-        table_bbox = table.get("bbox", [])
-        if len(table_bbox) != 4:
-            continue
-
-        overlap = bbox_overlap_ratio_of_smaller(cluster_bbox, table_bbox)
-        if overlap >= TABLE_OVERLAP_THRESHOLD:
-            return True
-
-    return False
-
-
-def _analyze_row_structure(row_texts: List[List[float]], bbox_width: float,
-                           col_tolerance: float = DEFAULT_COLUMN_CLUSTER_TOLERANCE) -> dict:
-    """
-    Analyze a row's structural properties.
-    """
-    result = {
-        "num_items": len(row_texts),
-        "num_cols": 0,
-        "span_ratio": 0.0,
-        "is_valid": False
-    }
-
-    if not row_texts:
-        return result
-
-    x_positions = [bbox[0] for bbox in row_texts]
-    column_clusters = cluster_positions(x_positions, col_tolerance)
-    result["num_cols"] = len(column_clusters)
-
-    if len(column_clusters) >= 2:
-        col_centers = sorted([sum(c) / len(c) for c in column_clusters])
-        col_span = col_centers[-1] - col_centers[0]
-        result["span_ratio"] = col_span / bbox_width if bbox_width > 0 else 0
-
-    result["is_valid"] = (
-        result["num_items"] >= MIN_ANCHOR_COLUMNS and
-        result["num_cols"] >= MIN_ANCHOR_COLUMNS and
-        result["span_ratio"] >= 0.60
-    )
-
-    return result
-
-
-def refine_table_top_boundary(
-    cluster_bbox: List[float],
-    text_elements: List[Dict],
-    col_tolerance: float = DEFAULT_COLUMN_CLUSTER_TOLERANCE,
-) -> List[float]:
-    """
-    Refine the top boundary of a promoted table by trimming header rows
-    until a row with proper table-like multi-column alignment is found.
-    """
-    if not cluster_bbox or len(cluster_bbox) != 4:
-        return cluster_bbox
-
-    x1, y1, x2, y2 = cluster_bbox
-    bbox_width = x2 - x1
-
-    if bbox_width <= 0:
-        return cluster_bbox
-
-    overlapping_texts = []
-    for text_elem in text_elements:
-        text_bbox = text_elem.get("bbox", [])
-        if text_bbox and bbox_overlap_ratio_of_smaller(cluster_bbox, text_bbox) >= 0.3:
-            overlapping_texts.append(text_bbox)
-
-    if len(overlapping_texts) < 6:
-        return cluster_bbox
-
-    overlapping_texts.sort(key=lambda b: b[1])
-
-    # Cluster into rows
-    rows = []
-    current_row = [overlapping_texts[0]]
-    current_row_y = overlapping_texts[0][1]
-
-    for text_bbox in overlapping_texts[1:]:
-        text_y = text_bbox[1]
-        if abs(text_y - current_row_y) <= ANCHOR_ROW_HEIGHT:
-            current_row.append(text_bbox)
-        else:
-            rows.append(current_row)
-            current_row = [text_bbox]
-            current_row_y = text_y
-
-    if current_row:
-        rows.append(current_row)
-
-    row_analyses = [_analyze_row_structure(row, bbox_width, col_tolerance) for row in rows]
-
-    anchor_y = y1
-
-    for i, (row_texts, analysis) in enumerate(zip(rows, row_analyses)):
-        if not row_texts:
-            continue
-
-        # RULE 1: High density rows are automatic anchors
-        if analysis["num_items"] >= HIGH_DENSITY_ITEMS:
-            anchor_y = min(bbox[1] for bbox in row_texts)
-            break
-
-        # RULE 2: Consecutive structure
-        if analysis["is_valid"]:
-            if i + 1 < len(row_analyses):
-                next_analysis = row_analyses[i + 1]
-                if next_analysis["is_valid"] or next_analysis["num_items"] >= HIGH_DENSITY_ITEMS:
-                    anchor_y = min(bbox[1] for bbox in row_texts)
-                    break
-            elif i == len(rows) - 1:
-                anchor_y = min(bbox[1] for bbox in row_texts)
-                break
-
-    if anchor_y > y1 + ANCHOR_ROW_HEIGHT:
-        return [x1, anchor_y, x2, y2]
-
-    return cluster_bbox
-
-
-def promote_layout_regions_to_tables(elements: List[Dict]) -> List[Dict]:
-    """
-    Promote clusters of layout_region elements to table elements.
-    """
-    existing_tables = [e for e in elements if e.get("type") == "table"]
-    text_elements = [e for e in elements if e.get("type") == "text"]
-    col_tol, row_tol = _scaled_tolerances(elements)
-
-    clusters = cluster_layout_regions_vertically(elements)
-
-    promoted_tables = []
-
-    for cluster in clusters:
-        cluster_bbox = calculate_cluster_bbox(cluster)
-
-        if not cluster_bbox:
-            continue
-
-        if overlaps_existing_table(cluster_bbox, existing_tables):
-            continue
-
-        is_valid, score, signals = validate_cluster_as_table(
-            cluster, text_elements, col_tol, row_tol
-        )
-
-        if is_valid:
-            refined_bbox = refine_table_top_boundary(cluster_bbox, text_elements, col_tol)
-
-            synthetic_table = {
-                "type": "table",
-                "bbox": refined_bbox,
-                "confidence": 0.80,
-                "source": "heuristic_promotion",
-                "structure_score": round(score, 1),
-                "structure_signals": signals
-            }
-            promoted_tables.append(synthetic_table)
-
-    if promoted_tables:
-        elements = elements + promoted_tables
-
-    return elements
-
-
-# ============================================================================
 # Table Cell Extraction (from Table Transformer structure data)
 # ============================================================================
 
@@ -685,24 +382,56 @@ def build_table_cells(
     columns = sorted(columns, key=lambda c: c["bbox"][0])
 
     # Build cell grid: each cell = intersection of row y-range and column x-range
-    # Edge-clamp: the structure model's edge columns/rows are often narrower than
-    # the actual data extent, truncating content.  Extend the first/last column
-    # and first/last row to the table bbox boundary.
-    last_col = len(columns) - 1
-    last_row = len(rows) - 1
+    # Gap-fill: extend adjacent rows/columns to the midpoint of the gap between
+    # them so small structural gaps don't lose text.  For first/last row/column,
+    # extend outward by at most half the median row height or column width to
+    # avoid absorbing header text or content outside the table.
+    row_heights = [r["bbox"][3] - r["bbox"][1] for r in rows]
+    col_widths = [c["bbox"][2] - c["bbox"][0] for c in columns]
+    median_row_h = sorted(row_heights)[len(row_heights) // 2] if row_heights else 0
+    median_col_w = sorted(col_widths)[len(col_widths) // 2] if col_widths else 0
+
+    # Pre-compute adjusted row y-ranges
+    row_ranges = []
+    for i, row in enumerate(rows):
+        ry1, ry2 = row["bbox"][1], row["bbox"][3]
+        # Extend top edge
+        if i == 0:
+            ry1 = max(ry1 - median_row_h / 2, table_bbox[1])
+        else:
+            prev_bottom = rows[i - 1]["bbox"][3]
+            ry1 = (prev_bottom + ry1) / 2
+        # Extend bottom edge
+        if i == len(rows) - 1:
+            ry2 = min(ry2 + median_row_h / 2, table_bbox[3])
+        else:
+            next_top = rows[i + 1]["bbox"][1]
+            ry2 = (ry2 + next_top) / 2
+        row_ranges.append((ry1, ry2))
+
+    # Pre-compute adjusted column x-ranges
+    col_ranges = []
+    for j, col in enumerate(columns):
+        cx1, cx2 = col["bbox"][0], col["bbox"][2]
+        # Extend left edge
+        if j == 0:
+            cx1 = max(cx1 - median_col_w / 2, table_bbox[0])
+        else:
+            prev_right = columns[j - 1]["bbox"][2]
+            cx1 = (prev_right + cx1) / 2
+        # Extend right edge
+        if j == len(columns) - 1:
+            cx2 = min(cx2 + median_col_w / 2, table_bbox[2])
+        else:
+            next_left = columns[j + 1]["bbox"][0]
+            cx2 = (cx2 + next_left) / 2
+        col_ranges.append((cx1, cx2))
+
     cells: List[Dict] = []
     for row_idx, row in enumerate(rows):
-        ry1, ry2 = row["bbox"][1], row["bbox"][3]
-        if row_idx == 0:
-            ry1 = min(ry1, table_bbox[1])
-        if row_idx == last_row:
-            ry2 = max(ry2, table_bbox[3])
+        ry1, ry2 = row_ranges[row_idx]
         for col_idx, col in enumerate(columns):
-            cx1, cx2 = col["bbox"][0], col["bbox"][2]
-            if col_idx == 0:
-                cx1 = min(cx1, table_bbox[0])
-            if col_idx == last_col:
-                cx2 = max(cx2, table_bbox[2])
+            cx1, cx2 = col_ranges[col_idx]
             cell_bbox = [cx1, ry1, cx2, ry2]
 
             # Check if this cell overlaps any header region
@@ -723,11 +452,11 @@ def build_table_cells(
                 "is_header": is_header,
             })
 
-    # Collect text elements overlapping the table (>=30%)
+    # Collect text elements overlapping the table (>=50%)
     overlapping_texts = []
     for te in text_elements:
         te_bbox = te.get("bbox", [])
-        if te_bbox and bbox_overlap_ratio_of_smaller(table_bbox, te_bbox) >= 0.3:
+        if te_bbox and bbox_overlap_ratio_of_smaller(table_bbox, te_bbox) >= 0.5:
             overlapping_texts.append(te)
 
     # Assign words to cells via center-point containment
