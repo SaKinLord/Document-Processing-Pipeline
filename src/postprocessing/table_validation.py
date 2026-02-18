@@ -8,7 +8,7 @@ and promotion of layout region clusters to table elements.
 import logging
 from typing import Dict, List, Tuple
 
-from src.utils.bbox import bbox_overlap_ratio_of_smaller
+from src.utils.bbox import bbox_overlap_ratio_of_smaller, split_line_bbox_to_words
 
 logger = logging.getLogger(__name__)
 
@@ -645,3 +645,117 @@ def promote_layout_regions_to_tables(elements: List[Dict]) -> List[Dict]:
         elements = elements + promoted_tables
 
     return elements
+
+
+# ============================================================================
+# Table Cell Extraction (from Table Transformer structure data)
+# ============================================================================
+
+def build_table_cells(
+    table_element: Dict,
+    text_elements: List[Dict],
+) -> List[Dict]:
+    """Build cell grid from table structure and assign text content to cells.
+
+    Uses the row/column bboxes from Table Transformer's structure recognition
+    to create a grid of cells, then assigns OCR text to each cell based on
+    word-level center-point containment.
+
+    Args:
+        table_element: Table element dict with ``structure`` key containing
+            ``rows``, ``columns``, ``cells``, and ``headers`` lists.
+        text_elements: All text elements on the page.
+
+    Returns:
+        List of cell dicts with ``row``, ``col``, ``bbox``, ``content``,
+        and ``is_header`` keys.  Returns empty list if structure has
+        0 rows or 0 columns.
+    """
+    structure = table_element.get("structure", {})
+    rows = structure.get("rows", [])
+    columns = structure.get("columns", [])
+    headers = structure.get("headers", [])
+    table_bbox = table_element.get("bbox", [])
+
+    if not rows or not columns or len(table_bbox) != 4:
+        return []
+
+    # Sort rows top-to-bottom, columns left-to-right (should already be sorted)
+    rows = sorted(rows, key=lambda r: r["bbox"][1])
+    columns = sorted(columns, key=lambda c: c["bbox"][0])
+
+    # Build cell grid: each cell = intersection of row y-range and column x-range
+    # Edge-clamp: the structure model's edge columns/rows are often narrower than
+    # the actual data extent, truncating content.  Extend the first/last column
+    # and first/last row to the table bbox boundary.
+    last_col = len(columns) - 1
+    last_row = len(rows) - 1
+    cells: List[Dict] = []
+    for row_idx, row in enumerate(rows):
+        ry1, ry2 = row["bbox"][1], row["bbox"][3]
+        if row_idx == 0:
+            ry1 = min(ry1, table_bbox[1])
+        if row_idx == last_row:
+            ry2 = max(ry2, table_bbox[3])
+        for col_idx, col in enumerate(columns):
+            cx1, cx2 = col["bbox"][0], col["bbox"][2]
+            if col_idx == 0:
+                cx1 = min(cx1, table_bbox[0])
+            if col_idx == last_col:
+                cx2 = max(cx2, table_bbox[2])
+            cell_bbox = [cx1, ry1, cx2, ry2]
+
+            # Check if this cell overlaps any header region
+            is_header = False
+            for hdr in headers:
+                hb = hdr["bbox"]
+                # Simple overlap: header bbox intersects this cell
+                if (hb[0] < cx2 and hb[2] > cx1 and
+                        hb[1] < ry2 and hb[3] > ry1):
+                    is_header = True
+                    break
+
+            cells.append({
+                "row": row_idx,
+                "col": col_idx,
+                "bbox": [round(v, 2) for v in cell_bbox],
+                "content": "",
+                "is_header": is_header,
+            })
+
+    # Collect text elements overlapping the table (>=30%)
+    overlapping_texts = []
+    for te in text_elements:
+        te_bbox = te.get("bbox", [])
+        if te_bbox and bbox_overlap_ratio_of_smaller(table_bbox, te_bbox) >= 0.3:
+            overlapping_texts.append(te)
+
+    # Assign words to cells via center-point containment
+    for te in overlapping_texts:
+        content = te.get("content", "")
+        te_bbox = te.get("bbox", [])
+        if not content or not te_bbox:
+            continue
+
+        words = content.split()
+        if not words:
+            continue
+
+        word_bboxes = split_line_bbox_to_words(te_bbox, words)
+
+        for word, wb in zip(words, word_bboxes):
+            # Word center point
+            wcx = (wb[0] + wb[2]) / 2
+            wcy = (wb[1] + wb[3]) / 2
+
+            # Find which cell contains this center point
+            for cell in cells:
+                cb = cell["bbox"]
+                if cb[0] <= wcx <= cb[2] and cb[1] <= wcy <= cb[3]:
+                    if cell["content"]:
+                        cell["content"] += " " + word
+                    else:
+                        cell["content"] = word
+                    break
+
+    return cells

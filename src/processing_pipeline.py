@@ -421,11 +421,25 @@ class DocumentProcessor:
             logger.info("  Running Table Transformer...")
             tables = self.table_recognizer.detect_tables(image)
             for table in tables:
-                page_content["elements"].append({
+                element = {
                     "type": "table",
                     "bbox": table['bbox'],
                     "confidence": table['confidence']
-                })
+                }
+                # Extract internal structure (rows, columns, cells, headers)
+                try:
+                    table_crop = crop_image(image, table['bbox'])
+                    structure = self.table_recognizer.extract_structure(table_crop)
+                    tx1, ty1 = table['bbox'][0], table['bbox'][1]
+                    for key in ('rows', 'columns', 'cells', 'headers'):
+                        for item in structure[key]:
+                            b = item['bbox']
+                            item['bbox'] = [b[0] + tx1, b[1] + ty1,
+                                            b[2] + tx1, b[3] + ty1]
+                    element['structure'] = structure
+                except (RuntimeError, ValueError) as e:
+                    logger.warning("  Table structure extraction failed: %s", e)
+                page_content["elements"].append(element)
         except (RuntimeError, ValueError) as e:
             logger.error("  Table detection failed: %s", e)
 

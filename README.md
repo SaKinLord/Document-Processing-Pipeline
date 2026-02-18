@@ -86,7 +86,7 @@ Flexible evaluation ignores punctuation and formatting differences. Pass/fail is
        LayoutLMv3 + Table Transformer + Florence-2 OD
                      |
                      v
-             POST-PROCESSING (18 stages)
+             POST-PROCESSING (19 stages)
                      |
                      v
                JSON OUTPUT
@@ -94,7 +94,7 @@ Flexible evaluation ignores punctuation and formatting differences. Pass/fail is
 
 ### Post-Processing Pipeline
 
-The post-processing pipeline in `postprocess_output()` applies 18 sequential stages:
+The post-processing pipeline in `postprocess_output()` applies 19 sequential stages:
 
 | # | Stage | Description |
 |---|-------|-------------|
@@ -114,8 +114,9 @@ The post-processing pipeline in `postprocess_output()` applies 18 sequential sta
 | 14 | Replace signature text | Pattern-matched signature labels -> `(signature)` |
 | 15 | Filter signature garbage | Remove single-word text overlapping >50% with signature bboxes |
 | 16 | Remove duplicate words | Fix TrOCR beam search artifacts (`straight straight` -> `straight`) |
-| 17 | Normalize phone numbers | Format phone numbers to `(xxx) xxx-xxxx`; detect fax vs phone |
-| 18 | Classification refinement | Detect misclassified typed documents via post-hoc signals |
+| 17 | Extract table cells | Assign OCR text to Table Transformer's row/column grid |
+| 18 | Normalize phone numbers | Format phone numbers to `(xxx) xxx-xxxx`; detect fax vs phone |
+| 19 | Classification refinement | Detect misclassified typed documents via post-hoc signals |
 
 ### Enhanced Document Classification
 
@@ -294,7 +295,14 @@ For each input file, a JSON is generated:
           "bbox": [50, 300, 700, 600],
           "confidence": 0.97,
           "structure_score": 85.0,
-          "structure_signals": ["columns:5", "rows:12", "grid_coverage:53%"]
+          "structure_signals": ["columns:5", "rows:12", "grid_coverage:53%"],
+          "num_rows": 12,
+          "num_columns": 5,
+          "cells": [
+            {"row": 0, "col": 0, "bbox": [50, 300, 180, 330], "content": "Date", "is_header": true},
+            {"row": 0, "col": 1, "bbox": [180, 300, 310, 330], "content": "Amount", "is_header": true},
+            {"row": 1, "col": 0, "bbox": [50, 330, 180, 360], "content": "01/15/1999", "is_header": false}
+          ]
         },
         {
           "type": "signature",
@@ -311,6 +319,8 @@ For each input file, a JSON is generated:
 
 **Text element fields:** `content`, `bbox`, `confidence` (Surya's), `source_model` (`surya`/`trocr`), `row_id`, optional `in_signature_region`, `hallucination_score`, `hallucination_signals`, `normalized_phone`, `phone_type`, `date_validation`, `offensive_ocr_corrected`
 
+**Table element fields:** `bbox`, `confidence`, `structure_score`, `structure_signals`, optional `num_rows`, `num_columns`, `cells` (array of `{row, col, bbox, content, is_header}`). Tables without extractable structure (e.g., heuristic-promoted) omit `cells`.
+
 ## Project Structure
 
 ```
@@ -320,7 +330,7 @@ Document-Processing-Pipeline/
 ├── requirements.txt
 ├── src/
 │   ├── processing_pipeline.py       # DocumentProcessor: model loading, per-page OCR routing
-│   ├── postprocessing/              # 18-stage post-processing pipeline (modular package)
+│   ├── postprocessing/              # 19-stage post-processing pipeline (modular package)
 │   │   ├── pipeline.py              # Orchestrator: postprocess_output() entry point
 │   │   ├── hallucination.py         # 7-signal hallucination scoring and removal
 │   │   ├── ocr_corrections.py       # Single-word, multi-word, offensive, and prefix corrections

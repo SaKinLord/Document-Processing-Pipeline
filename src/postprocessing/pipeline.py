@@ -19,6 +19,7 @@ from .table_validation import (
     filter_empty_regions,
     filter_invalid_tables,
     promote_layout_regions_to_tables,
+    build_table_cells,
 )
 from .ocr_corrections import (
     filter_offensive_ocr_misreads,
@@ -132,6 +133,7 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
     3.3. Replace signature text
     3.35. Filter signature overlap garbage (short fragments on cursive signatures)
     3.5. Remove consecutive duplicate words (TrOCR beam search fix)
+    3.55. Extract table cell content (assign text to structure grid)
     4. Normalize phone numbers
 
     Args:
@@ -246,6 +248,23 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
         count_before = len(elements)
         elements = remove_consecutive_duplicate_words(elements)
         _log_step("dedup_words", count_before, len(elements))
+
+        # Step 3.55: Extract table cell content from structure data
+        text_elements = [e for e in elements if e.get("type") == "text"]
+        cell_count = 0
+        for element in elements:
+            if element.get("type") == "table" and "structure" in element:
+                cells = build_table_cells(element, text_elements)
+                if cells:
+                    element["cells"] = cells
+                    element["num_rows"] = max(c["row"] for c in cells) + 1
+                    element["num_columns"] = max(c["col"] for c in cells) + 1
+                    cell_count += len(cells)
+                del element["structure"]
+        if cell_count:
+            logger.info("  [table_cells] extracted %d cells", cell_count)
+        else:
+            logger.debug("  [table_cells] no tables with structure data")
 
         # Step 4: Normalize phone numbers
         count_before = len(elements)
