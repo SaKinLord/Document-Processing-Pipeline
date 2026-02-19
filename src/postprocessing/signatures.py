@@ -1,9 +1,8 @@
 """
 Signature detection, text replacement, and garbage filtering for OCR output.
 
-Handles replacing OCR-read signature text with '(signature)' markers,
-filtering garbage fragments overlapping signature regions, and detecting
-typed document indicators.
+Handles replacing OCR-read signature text with '(signature)' markers and
+filtering garbage fragments overlapping signature regions.
 """
 
 import re
@@ -13,71 +12,6 @@ from typing import Dict, List
 from src.utils.bbox import bbox_overlap_ratio_of_smaller
 
 logger = logging.getLogger(__name__)
-
-
-# ============================================================================
-# Document Type Indicators (Text-based classification helpers)
-# ============================================================================
-
-FAX_HEADER_PATTERNS = [
-    r'\b(FAX|FACSIMILE|TELECOPY)\b',
-    r'\bFAX\s*(NO|NUMBER|#)?[:\s]*\(?\d{3}\)?[-\s]?\d{3}[-\s]?\d{4}',
-    r'\b(FROM|TO|DATE|RE|SUBJECT|PAGES?)\s*:',
-]
-
-TYPED_INDICATOR_PATTERNS = [
-    r'\bDEPARTMENT\s+OF\b',
-    r'\b(FORM|APPLICATION|CERTIFICATE)\s+\d+',
-    r'\bOFFICIAL\s+USE\s+ONLY\b',
-    r'\bPRINT\s+NAME\b',
-    r'\bSIGNATURE\s+DATE\b',
-    r'\b(?:PAGE|PG|P)\s*\d+\s*(?:OF|/)\s*\d+',
-]
-
-
-def detect_typed_document_indicators(text: str) -> dict:
-    """
-    Detect text patterns that indicate a typed/form/fax document.
-
-    This is used to catch misclassified typed documents that were
-    incorrectly classified as handwritten based on image features.
-    """
-    result = {
-        'is_likely_typed': False,
-        'fax_indicators': [],
-        'form_indicators': [],
-        'confidence_boost': 0.0
-    }
-
-    if not text:
-        return result
-
-    text_upper = text.upper()
-
-    for pattern in FAX_HEADER_PATTERNS:
-        if re.search(pattern, text_upper):
-            result['fax_indicators'].append(pattern)
-
-    for pattern in TYPED_INDICATOR_PATTERNS:
-        if re.search(pattern, text_upper):
-            result['form_indicators'].append(pattern)
-
-    fax_count = len(result['fax_indicators'])
-    form_count = len(result['form_indicators'])
-
-    if fax_count >= 2:
-        result['confidence_boost'] = 0.25
-        result['is_likely_typed'] = True
-    elif fax_count == 1 and form_count >= 1:
-        result['confidence_boost'] = 0.20
-        result['is_likely_typed'] = True
-    elif form_count >= 3:
-        result['confidence_boost'] = 0.15
-        result['is_likely_typed'] = True
-    elif fax_count == 1 or form_count >= 2:
-        result['confidence_boost'] = 0.10
-
-    return result
 
 
 # ============================================================================

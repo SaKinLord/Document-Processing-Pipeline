@@ -21,16 +21,11 @@ from .table_validation import (
     filter_invalid_tables,
     build_table_cells,
 )
-from .ocr_corrections import (
-    filter_offensive_ocr_misreads,
-    correct_nonword_ocr_errors,
-    apply_ocr_corrections,
-)
+from .ocr_corrections import correct_nonword_ocr_errors
 from .phone_date import normalize_phone_numbers
 from .signatures import (
     replace_signature_text,
     filter_signature_overlap_garbage,
-    detect_typed_document_indicators,
 )
 logger = logging.getLogger(__name__)
 
@@ -123,13 +118,11 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
     1. Deduplicate layout regions
     2. Score and handle hallucinations (with margin awareness)
     2.1. Filter rotated margin text (Bates numbers, vertical IDs)
-    2.5. Filter offensive OCR misreads (P0 reputational risk, with re-verification)
     3. Clean text content
     3.05. Strip spurious TrOCR trailing periods (typed/mixed docs only)
     3.06. Repair decimal-dash confusion (.88 → -88, generalizable)
-    3.1. Repair dropped parentheses (P3)
+    3.1. Repair dropped parentheses
     3.2. Generalizable non-word OCR correction (spell checker + OCR confusion matrix)
-    3.25. Apply prefix restoration in negation context
     3.3. Replace signature text
     3.35. Filter signature overlap garbage (short fragments on cursive signatures)
     3.5. Remove consecutive duplicate words (TrOCR beam search fix)
@@ -138,8 +131,8 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
 
     Args:
         output_data: Raw OCR output dictionary
-        page_images: List of PIL Images per page (optional, enables offensive filter re-verification)
-        handwriting_recognizer: TrOCR recognizer instance (optional)
+        page_images: List of PIL Images per page (optional, used for page dimension derivation)
+        handwriting_recognizer: TrOCR recognizer instance (optional, unused — kept for API compatibility)
 
     Returns:
         Cleaned output dictionary
@@ -151,7 +144,7 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
         # Step -1: Sanitize element fields (validate at the boundary)
         elements = sanitize_elements(elements)
 
-        # Extract page image once (used by offensive filter + dimension derivation)
+        # Extract page image once (used for page dimension derivation)
         page_image = page_images[page_idx] if page_images and page_idx < len(page_images) else None
         page_dims: Optional[Tuple[int, int]] = None
         if page_image is not None:
@@ -186,12 +179,6 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
         count_before = len(elements)
         elements = filter_rotated_margin_text(elements, page_dimensions=page_dims)
         _log_step("rotated_margin", count_before, len(elements))
-
-        # Step 2.5: Filter offensive OCR misreads (with source image re-verification)
-        count_before = len(elements)
-        elements = filter_offensive_ocr_misreads(elements, page_image=page_image,
-                                                  handwriting_recognizer=handwriting_recognizer)
-        _log_step("offensive_filter", count_before, len(elements))
 
         # Step 3: Clean text content
         count_before = len(elements)
@@ -244,14 +231,6 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
                 )
         logger.debug("  [nonword_ocr_corrections] spell-checker pass complete")
 
-        # Step 3.25: Apply context-gated OCR corrections (with slash-compound splitting)
-        for element in elements:
-            if element.get('type') == 'text' and element.get('content'):
-                element['content'] = apply_ocr_corrections(
-                    element['content'], page_context=page_context
-                )
-        logger.debug("  [ocr_corrections] applied to text elements")
-
         # Step 3.3: Replace signature text readings with '(signature)'
         count_before = len(elements)
         elements = replace_signature_text(elements)
@@ -288,18 +267,6 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
         count_before = len(elements)
         elements = normalize_phone_numbers(elements)
         _log_step("phones", count_before, len(elements))
-
-        # Step 5: Classification refinement (detect misclassified typed docs)
-        all_text = ' '.join([e.get('content', '') for e in elements if e.get('type') == 'text'])
-        typed_indicators = detect_typed_document_indicators(all_text)
-
-        if typed_indicators['is_likely_typed']:
-            page['classification_refinement'] = {
-                'likely_typed': True,
-                'fax_indicators': len(typed_indicators['fax_indicators']),
-                'form_indicators': len(typed_indicators['form_indicators']),
-                'suggested_boost': typed_indicators['confidence_boost']
-            }
 
         page["elements"] = elements
 

@@ -14,10 +14,9 @@ A local pipeline for extracting structured data from complex, multi-format docum
     *   **Florence-2 (VLM):** Vision-language model for object detection, captioning, and phrase grounding (signatures, handwriting, logos, seals)
 *   **Multi-Stage Post-Processing:**
     *   7-signal hallucination detection and removal
-    *   Offensive OCR misread filter with audit trail
-    *   Context-aware OCR corrections (single-word and multi-word)
+    *   Generalizable non-word OCR correction (spell checker + OCR confusion matrix)
+    *   Decimal-dash confusion repair with page-level context detection
     *   Parenthesis repair for Surya artifacts
-    *   Slash/hyphen compound word splitting before corrections
     *   Signature text replacement and garbage filtering
     *   Structural table validation and cell-level content extraction
     *   Phone number normalization and date validation
@@ -31,8 +30,8 @@ Based on regression testing with 32 ground truth documents (typed, handwritten, 
 | Metric | Value |
 |--------|-------|
 | Regression Tests | **30/32 passing** |
-| Average Flex WER | **~11.2%** |
-| Average Flex CER | **~7.8%** |
+| Average Flex WER | **~12.0%** |
+| Average Flex CER | **~8.2%** |
 
 Flexible evaluation ignores punctuation and formatting differences. Pass/fail is determined by flex CER.
 
@@ -87,7 +86,7 @@ Flexible evaluation ignores punctuation and formatting differences. Pass/fail is
        LayoutLMv3 + Table Transformer + Florence-2 OD
                      |
                      v
-             POST-PROCESSING (18 stages)
+             POST-PROCESSING (15 stages)
                      |
                      v
                JSON OUTPUT
@@ -95,7 +94,7 @@ Flexible evaluation ignores punctuation and formatting differences. Pass/fail is
 
 ### Post-Processing Pipeline
 
-The post-processing pipeline in `postprocess_output()` applies 18 sequential stages:
+The post-processing pipeline in `postprocess_output()` applies 15 sequential stages:
 
 | # | Stage | Description |
 |---|-------|-------------|
@@ -105,19 +104,17 @@ The post-processing pipeline in `postprocess_output()` applies 18 sequential sta
 | 4 | Deduplicate layout regions | Remove duplicate regions by bbox |
 | 5 | Score hallucinations | 7-signal scoring; remove >= 0.50, flag > 0.30 |
 | 6 | Filter rotated margin text | Remove vertical Bates numbers at page edges |
-| 7 | Filter offensive misreads | Cross-model re-verification with TrOCR tiebreaker and audit trail |
-| 8 | Clean text content | Whitespace normalization, Unicode fixes, HTML/math markup stripping |
-| 8.5 | Classification override | If >=50% of text elements sourced from TrOCR, override page type to handwritten |
-| 9 | Strip TrOCR trailing periods | Remove spurious periods from TrOCR output (typed/mixed docs only, abbreviation-safe) |
+| 7 | Clean text content | Whitespace normalization, Unicode fixes, HTML/math markup stripping |
+| 7.5 | Classification override | If >=50% of text elements sourced from TrOCR, override page type to handwritten |
+| 8 | Strip TrOCR trailing periods | Remove spurious periods from TrOCR output (typed/mixed docs only, abbreviation-safe) |
+| 9 | Repair decimal-dash confusion | Page-level context detection; fix `.88` misread as `-88` |
 | 10 | Repair parentheses | Fix Surya's `BRANDS)` -> `BRAND(S)` pattern |
-| 11 | OCR corrections | Context-aware single-word fixes with slash/hyphen splitting |
-| 12 | Multi-word corrections | Proper noun phrase replacements (e.g., `HAVENS GERMAN` -> `HAGENS BERMAN`) |
-| 13 | Replace signature text | Pattern-matched signature labels -> `(signature)` |
-| 14 | Filter signature garbage | Remove single-word text overlapping >50% with signature bboxes |
-| 15 | Remove duplicate words | Fix TrOCR beam search artifacts (`straight straight` -> `straight`) |
-| 16 | Extract table cells | Assign OCR text to Table Transformer's row/column grid |
-| 17 | Normalize phone numbers | Format phone numbers to `(xxx) xxx-xxxx`; detect fax vs phone |
-| 19 | Classification refinement | Detect misclassified typed documents via post-hoc signals |
+| 11 | Non-word OCR correction | Generalizable spell checker + OCR character confusion matrix |
+| 12 | Replace signature text | Pattern-matched signature labels -> `(signature)` |
+| 13 | Filter signature garbage | Remove single-word text overlapping >50% with signature bboxes |
+| 14 | Remove duplicate words | Fix TrOCR beam search artifacts (`straight straight` -> `straight`) |
+| 15 | Extract table cells | Assign OCR text to Table Transformer's row/column grid |
+| 16 | Normalize phone numbers | Format phone numbers to `(xxx) xxx-xxxx`; detect fax vs phone |
 
 ### Enhanced Document Classification
 
@@ -182,16 +179,15 @@ Adds `normalized_phone`, `phone_type` (`"fax"` or `"phone"`), and validation sta
 
 ### OCR Correction System
 
-Four correction dictionaries handle different error types:
+A single generalizable correction mechanism handles OCR errors without corpus-specific dictionaries:
 
-| Dictionary | Scope | Context Rules |
-|------------|-------|---------------|
-| `OFFENSIVE_OCR_CORRECTIONS` | Regex-based reputational-risk misreads | Unconditional with audit trail |
-| `OCR_CONFUSION_CORRECTIONS` | Single-word substitutions (~25 entries) | Empty context `[]` = unconditional (non-real words only); non-empty = requires context word in 5-word window |
-| `MULTI_WORD_OCR_CORRECTIONS` | Proper noun phrases (~15 entries) | Same context rules; real English phrases require context |
-| `PREFIX_CORRECTIONS` | TrOCR dropped prefixes (un-/dis-) | Handwriting mode only; checks negation context window |
+| Component | Scope | Logic |
+|-----------|-------|-------|
+| `pyspellchecker` | Detect non-words | Words not in English dictionary (min 5 chars, skips acronyms/digits) |
+| OCR confusion matrix | Filter candidates | Only accept corrections differing by visually confusable characters (e.g., `c`↔`e`, `l`↔`1`, `n`↔`h`) |
+| Frequency ranking | Disambiguation | When multiple OCR-plausible candidates exist, pick the most common English word |
 
-Compound words split on `/` or `-` before matching (e.g., `DIRECTOR/DEPARIMENT` -> `DIRECTOR/DEPARTMENT`).
+This approach is fully generalizable — it works on any English document without manual dictionary updates.
 
 ## Setup
 
@@ -309,7 +305,7 @@ For each input file, a JSON is generated:
 
 **Element types:** `text`, `table`, `layout_region`, `signature`, `logo`, `seal`, `figure`, `image`, `human face`
 
-**Text element fields:** `content`, `bbox`, `confidence` (Surya's), `source_model` (`surya`/`trocr`), `row_id`, optional `in_signature_region`, `hallucination_score`, `hallucination_signals`, `normalized_phone`, `phone_type`, `date_validation`, `offensive_ocr_corrected`
+**Text element fields:** `content`, `bbox`, `confidence` (Surya's), `source_model` (`surya`/`trocr`), `row_id`, optional `in_signature_region`, `hallucination_score`, `hallucination_signals`, `normalized_phone`, `phone_type`, `date_validation`
 
 **Table element fields:** `bbox`, `confidence`, `structure_score`, `structure_signals`, optional `num_rows`, `num_columns`, `cells` (array of `{row, col, bbox, content, is_header}`).
 
@@ -322,10 +318,10 @@ Document-Processing-Pipeline/
 ├── requirements.txt
 ├── src/
 │   ├── processing_pipeline.py       # DocumentProcessor: model loading, per-page OCR routing
-│   ├── postprocessing/              # 18-stage post-processing pipeline (modular package)
+│   ├── postprocessing/              # 15-stage post-processing pipeline (modular package)
 │   │   ├── pipeline.py              # Orchestrator: postprocess_output() entry point
 │   │   ├── hallucination.py         # 7-signal hallucination scoring and removal
-│   │   ├── ocr_corrections.py       # Single-word, multi-word, offensive, and prefix corrections
+│   │   ├── ocr_corrections.py       # Generalizable spell checker + OCR confusion matrix
 │   │   ├── normalization.py         # Underscore normalization, text cleaning, parenthesis repair
 │   │   ├── signatures.py            # Signature text replacement and garbage filtering
 │   │   ├── table_validation.py      # Table structure scoring and cell extraction
