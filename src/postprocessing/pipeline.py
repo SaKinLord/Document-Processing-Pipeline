@@ -196,8 +196,26 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
         elements = clean_text_content(elements)
         _log_step("clean_text", count_before, len(elements))
 
-        # Step 3.05: Strip spurious TrOCR trailing periods (typed/mixed docs only)
+        # Step 3.02: Post-OCR classification refinement
+        # If majority of text elements were sourced from TrOCR, override to handwritten
         doc_type = page.get("document_type", "typed")
+        text_els = [e for e in elements if e.get("type") == "text" and e.get("content", "").strip()]
+        if text_els:
+            trocr_count = sum(1 for e in text_els if e.get("source_model") == "trocr")
+            trocr_ratio = trocr_count / len(text_els)
+            if trocr_ratio >= 0.50 and doc_type != "handwritten":
+                original_type = doc_type
+                doc_type = "handwritten"
+                page["document_type"] = "handwritten"
+                page["classification_override"] = {
+                    "original": original_type,
+                    "reason": "trocr_majority",
+                    "trocr_ratio": round(trocr_ratio, 2)
+                }
+                logger.info("  [classification_override] %s → handwritten (TrOCR ratio: %.0f%%)",
+                            original_type, trocr_ratio * 100)
+
+        # Step 3.05: Strip spurious TrOCR trailing periods (typed/mixed docs only)
         count_before = len(elements)
         elements = strip_trocr_trailing_periods(elements, document_type=doc_type)
         _log_step("trocr_period_strip", count_before, len(elements))

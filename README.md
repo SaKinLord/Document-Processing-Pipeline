@@ -31,8 +31,8 @@ Based on regression testing with 32 ground truth documents (typed, handwritten, 
 | Metric | Value |
 |--------|-------|
 | Regression Tests | **30/32 passing** |
-| Average Flex WER | **~11.6%** |
-| Average Flex CER | **~8.2%** |
+| Average Flex WER | **~11.2%** |
+| Average Flex CER | **~7.8%** |
 
 Flexible evaluation ignores punctuation and formatting differences. Pass/fail is determined by flex CER.
 
@@ -106,7 +106,8 @@ The post-processing pipeline in `postprocess_output()` applies 18 sequential sta
 | 5 | Score hallucinations | 7-signal scoring; remove >= 0.50, flag > 0.30 |
 | 6 | Filter rotated margin text | Remove vertical Bates numbers at page edges |
 | 7 | Filter offensive misreads | Cross-model re-verification with TrOCR tiebreaker and audit trail |
-| 8 | Clean text content | Whitespace normalization, Unicode fixes |
+| 8 | Clean text content | Whitespace normalization, Unicode fixes, HTML/math markup stripping |
+| 8.5 | Classification override | If >=50% of text elements sourced from TrOCR, override page type to handwritten |
 | 9 | Strip TrOCR trailing periods | Remove spurious periods from TrOCR output (typed/mixed docs only, abbreviation-safe) |
 | 10 | Repair parentheses | Fix Surya's `BRANDS)` -> `BRAND(S)` pattern |
 | 11 | OCR corrections | Context-aware single-word fixes with slash/hyphen splitting |
@@ -376,7 +377,7 @@ All models load onto GPU if available, falling back to CPU.
 
 *   **Florence-2 bbox precision:** Florence-2 phrase grounding returns coarse bounding boxes. In mixed documents, a handwriting region may extend over adjacent typed text, causing those lines to be routed through TrOCR unnecessarily. The impact is minor (TrOCR may lowercase typed text), and the net effect is still positive for handwriting recall.
 *   **Dense form layouts:** Documents with complex grid structures (many small fields, checkboxes, and lines) produce fragmented OCR elements. The two currently failing test documents (33% and 30% flex WER) are both dense Hazleton Laboratories project sheet forms.
-*   **Classification edge cases:** Some fully handwritten documents on clean white paper with uniform line spacing are misclassified as "typed" by the 8-feature classifier. Per-line Florence-2 routing compensates for this (lines still get TrOCR), but the TrOCR trailing period strip may incorrectly remove legitimate sentence-ending periods when the page is labeled "typed."
+*   **Classification edge cases:** Some fully handwritten documents on clean white paper with uniform line spacing are misclassified as "typed" by the image-based 8-feature classifier. A post-OCR classification override corrects this: if >=50% of text elements were sourced from TrOCR, the page is reclassified as "handwritten," preserving legitimate sentence-ending periods that would otherwise be stripped.
 
 ## License
 

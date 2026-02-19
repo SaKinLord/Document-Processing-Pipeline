@@ -11,6 +11,13 @@ from typing import Dict, List
 
 logger = logging.getLogger(__name__)
 
+_MARKUP_TAG_RE = re.compile(r'<[^>]+>')
+
+
+def strip_markup_tags(text: str) -> str:
+    """Strip HTML/math/formatting tags from OCR text output."""
+    return _MARKUP_TAG_RE.sub('', text)
+
 
 def normalize_underscores(text: str) -> str:
     """
@@ -126,11 +133,14 @@ def clean_text_content(elements: List[Dict]) -> List[Dict]:
 
         content = element.get("content", "")
 
-        # Normalize whitespace
-        content = " ".join(content.split())
-
         # Fix common encoding issues
         content = fix_encoding_issues(content)
+
+        # Strip HTML/math markup tags (Surya OCR artifact)
+        content = strip_markup_tags(content)
+
+        # Normalize whitespace (re-normalize after stripping)
+        content = " ".join(content.split())
 
         element["content"] = content
 
