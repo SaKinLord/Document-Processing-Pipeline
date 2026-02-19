@@ -37,10 +37,8 @@ from .table_validation import (
 from .ocr_corrections import (
     filter_offensive_ocr_misreads,
     apply_ocr_corrections,
-    apply_multi_word_ocr_corrections,
+    correct_nonword_ocr_errors,
     OFFENSIVE_OCR_CORRECTIONS,
-    OCR_CONFUSION_CORRECTIONS,
-    MULTI_WORD_OCR_CORRECTIONS,
     PREFIX_CORRECTIONS,
 )
 from .phone_date import (
@@ -91,10 +89,8 @@ __all__ = [
     # OCR corrections
     'filter_offensive_ocr_misreads',
     'apply_ocr_corrections',
-    'apply_multi_word_ocr_corrections',
+    'correct_nonword_ocr_errors',
     'OFFENSIVE_OCR_CORRECTIONS',
-    'OCR_CONFUSION_CORRECTIONS',
-    'MULTI_WORD_OCR_CORRECTIONS',
     'PREFIX_CORRECTIONS',
     # Phone/Date
     'validate_phone_number',

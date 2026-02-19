@@ -11,6 +11,7 @@ from .normalization import (
     normalize_underscore_fields,
     clean_text_content,
     strip_trocr_trailing_periods,
+    repair_decimal_dash_confusion,
     repair_dropped_parentheses,
     remove_consecutive_duplicate_words,
 )
@@ -22,8 +23,8 @@ from .table_validation import (
 )
 from .ocr_corrections import (
     filter_offensive_ocr_misreads,
+    correct_nonword_ocr_errors,
     apply_ocr_corrections,
-    apply_multi_word_ocr_corrections,
 )
 from .phone_date import normalize_phone_numbers
 from .signatures import (
@@ -125,9 +126,10 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
     2.5. Filter offensive OCR misreads (P0 reputational risk, with re-verification)
     3. Clean text content
     3.05. Strip spurious TrOCR trailing periods (typed/mixed docs only)
+    3.06. Repair decimal-dash confusion (.88 → -88, generalizable)
     3.1. Repair dropped parentheses (P3)
-    3.25. Apply handwritten OCR corrections (with slash-compound splitting)
-    3.26. Apply multi-word proper noun corrections (P1)
+    3.2. Generalizable non-word OCR correction (spell checker + OCR confusion matrix)
+    3.25. Apply prefix restoration in negation context
     3.3. Replace signature text
     3.35. Filter signature overlap garbage (short fragments on cursive signatures)
     3.5. Remove consecutive duplicate words (TrOCR beam search fix)
@@ -220,13 +222,16 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
         elements = strip_trocr_trailing_periods(elements, document_type=doc_type)
         _log_step("trocr_period_strip", count_before, len(elements))
 
+        # Step 3.06: Repair decimal-dash confusion (.88 → -88)
+        elements = repair_decimal_dash_confusion(elements)
+
         # Step 3.1: Repair dropped parentheses
         for element in elements:
             if element.get('type') == 'text' and element.get('content'):
                 element['content'] = repair_dropped_parentheses(element['content'])
         logger.debug("  [paren_repair] applied to text elements")
 
-        # Step 3.25: Apply OCR corrections (with slash-compound splitting)
+        # Step 3.2: Generalizable non-word OCR correction (spell checker + confusion matrix)
         page_context = set()
         for element in elements:
             if element.get('type') == 'text' and element.get('content'):
@@ -234,16 +239,18 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
                     page_context.add(w.rstrip(':.,;!?').lower())
         for element in elements:
             if element.get('type') == 'text' and element.get('content'):
+                element['content'] = correct_nonword_ocr_errors(
+                    element['content'], page_context=page_context
+                )
+        logger.debug("  [nonword_ocr_corrections] spell-checker pass complete")
+
+        # Step 3.25: Apply context-gated OCR corrections (with slash-compound splitting)
+        for element in elements:
+            if element.get('type') == 'text' and element.get('content'):
                 element['content'] = apply_ocr_corrections(
                     element['content'], page_context=page_context
                 )
         logger.debug("  [ocr_corrections] applied to text elements")
-
-        # Step 3.26: Apply multi-word proper noun corrections
-        for element in elements:
-            if element.get('type') == 'text' and element.get('content'):
-                element['content'] = apply_multi_word_ocr_corrections(element['content'], page_context=page_context)
-        logger.debug("  [multi_word_corrections] applied to text elements")
 
         # Step 3.3: Replace signature text readings with '(signature)'
         count_before = len(elements)

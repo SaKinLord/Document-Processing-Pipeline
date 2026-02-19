@@ -295,6 +295,107 @@ def repair_dropped_parentheses(text: str) -> str:
     return text
 
 
+# ============================================================================
+# Decimal-Dash Confusion Repair
+# ============================================================================
+
+# Surya OCR systematically misreads leading decimal points as dashes:
+#   '.88' → '-88',  '.474' → '-474',  '.841' → '-841'
+# Also misreads '.' as bullet '•' in numeric contexts:
+#   '.55' → '•55'
+#
+# These patterns are detected by page-level context: if the page contains
+# other decimal numbers (e.g., "14.00", "12.5"), dash-digit tokens are
+# likely misread decimals rather than negative numbers.
+
+# Standalone: space/start + dash + 2-4 digits + space/end/punct
+_STANDALONE_DASH_DECIMAL_RE = re.compile(
+    r'(?:^|(?<=\s))-(\d{2,4})(?=\s|$|[,;:!?\)\]])'
+)
+# Label-attached: ALL_CAPS_LABEL + dash + 2-4 digits (MENT-474 → MENT.474)
+_LABEL_DASH_DECIMAL_RE = re.compile(
+    r'([A-Z]{2,})-(\d{2,4})(?!\d)(?![-/a-zA-Z])'
+)
+# Bullet-decimal: •digit → .digit
+_BULLET_DECIMAL_RE = re.compile(r'\u2022(\d)')
+# Page-level decimal context detection
+_DECIMAL_NUMBER_RE = re.compile(r'\b\d+\.\d+\b')
+# Date/phone patterns to skip
+_DATE_PATTERN_RE = re.compile(r'\d{1,2}[/-]\d{1,2}[/-]\d{2,4}')
+_PHONE_PATTERN_RE = re.compile(r'\(?\d{3}\)?[-.\s]\d{3}[-.\s]\d{4}')
+
+
+def repair_decimal_dash_confusion(elements: List[Dict]) -> List[Dict]:
+    """
+    Fix Surya OCR confusion where decimal points are read as dashes or bullets.
+
+    Uses page-level context: only corrects when the page already contains
+    decimal numbers (e.g., "14.00", "12.5"), indicating a numeric/scientific
+    context where fractional values are expected.
+
+    Safe guards:
+    - Requires 2-4 digits after the dash (skips '-5' which could be negative)
+    - Skips date patterns (MM/DD/YYYY) and phone numbers
+    - Standalone pattern only matches when dash is preceded by whitespace/start
+    - Label pattern only matches ALL-CAPS labels (MENT-474, not semi-detached)
+
+    Args:
+        elements: List of element dictionaries
+
+    Returns:
+        Elements with decimal-dash confusions repaired
+    """
+    # Phase 1: Detect decimal context on the page
+    all_text = ' '.join(
+        e.get('content', '') for e in elements
+        if e.get('type') == 'text' and e.get('content')
+    )
+    if not _DECIMAL_NUMBER_RE.search(all_text):
+        return elements  # No decimal numbers on page → skip
+
+    # Phase 2: Apply corrections element by element
+    corrections = 0
+    for element in elements:
+        if element.get('type') != 'text':
+            continue
+        content = element.get('content', '')
+        if not content:
+            continue
+
+        original = content
+
+        # Always fix bullet-decimal (encoding issue, not context-dependent)
+        content = _BULLET_DECIMAL_RE.sub(r'.\1', content)
+
+        # Skip elements that are clearly dates or phone numbers
+        if _DATE_PATTERN_RE.search(content):
+            if content != original:
+                element['content'] = content
+            continue
+        if _PHONE_PATTERN_RE.search(content):
+            if content != original:
+                element['content'] = content
+            continue
+
+        # Fix standalone dash-decimal tokens
+        content = _STANDALONE_DASH_DECIMAL_RE.sub(r'.\1', content)
+
+        # Fix label-attached dash-decimal (MENT-474 → MENT.474)
+        content = _LABEL_DASH_DECIMAL_RE.sub(r'\1.\2', content)
+
+        if content != original:
+            element['content'] = content
+            element['decimal_dash_repaired'] = True
+            corrections += 1
+            logger.debug("Decimal-dash repair: '%s' → '%s'",
+                         original[:60], content[:60])
+
+    if corrections:
+        logger.info("  [decimal_dash_repair] corrected %d elements", corrections)
+
+    return elements
+
+
 def remove_consecutive_duplicate_words(elements: List[Dict]) -> List[Dict]:
     """
     Remove consecutive duplicate words from text content.

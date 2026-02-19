@@ -1,18 +1,181 @@
 """
-OCR correction logic for handwritten and typed documents.
+OCR correction logic for post-processing.
 
-Handles single-word confusion corrections, multi-word proper noun corrections,
-prefix restoration, offensive OCR misread filtering with cross-model re-verification,
-and slash-compound word splitting.
+Handles:
+- Generalizable non-word correction via spell checker + OCR confusion matrix
+- Prefix restoration in negation context
+- Offensive OCR misread filtering with cross-model re-verification
 """
 
 import re
 import logging
-from typing import Dict, List
+from typing import Dict, List, Optional, Set
 
 from .normalization import _clean_trocr_trailing_period
 
 logger = logging.getLogger(__name__)
+
+# ============================================================================
+# OCR-Aware Spell Correction (Generalizable)
+# ============================================================================
+#
+# Uses pyspellchecker for word validation and an OCR character confusion matrix
+# to filter candidates to visually plausible substitutions only.
+#
+# This catches ANY non-word OCR error automatically, making the pipeline robust
+# to new documents without manual dictionary updates.
+
+# Characters commonly confused by OCR engines (visual similarity)
+OCR_CHAR_CONFUSIONS = {
+    'c': 'eoa',    'e': 'co',      'a': 'oe',     'o': 'ae0c',
+    'l': '1Ii',    '1': 'lI',      'I': 'l1',     'i': 'jl1t',
+    'n': 'rih',    'h': 'bn',      'b': 'h6',     'd': 'o',
+    'O': '0DQ',    '0': 'O',       'D': 'O',
+    'S': '5$',     '5': 'S$',      '$': 'S5',
+    'B': '8R',     '8': 'B',       'R': 'B',
+    'G': 'C6',     'C': 'GO',      '6': 'Gb',
+    'u': 'vn',     'v': 'uy',      'w': 'vv',
+    'f': 't',      't': 'fi',      'r': 'v',
+    'g': 'q9',     'q': 'g9',      '9': 'gq',
+    'p': 'b',      'm': 'nn',
+}
+
+# Minimum word length for spell-check correction (shorter words are too ambiguous)
+_MIN_SPELLCHECK_LEN = 5
+
+# Lazy-initialized spell checker singleton
+_spell_checker = None
+
+
+def _get_spell_checker():
+    """Lazy-initialize the spell checker."""
+    global _spell_checker
+    if _spell_checker is not None:
+        return _spell_checker
+
+    try:
+        from spellchecker import SpellChecker
+        _spell_checker = SpellChecker()
+        logger.debug("Spell checker initialized")
+        return _spell_checker
+
+    except ImportError:
+        logger.warning("pyspellchecker not installed — non-word OCR correction disabled. "
+                       "Install with: pip install pyspellchecker")
+        return None
+
+
+def _is_ocr_plausible(wrong: str, candidate: str) -> bool:
+    """Check if a correction candidate differs by OCR-confusable characters only.
+
+    Returns True if every character difference between wrong and candidate
+    is explained by a known OCR visual confusion. This prevents generic
+    spell-checker suggestions that aren't plausible OCR errors.
+    """
+    if abs(len(wrong) - len(candidate)) > 1:
+        return False  # Length difference > 1 is unlikely a simple OCR confusion
+
+    # Same length: check each position
+    if len(wrong) == len(candidate):
+        diff_count = 0
+        for w, c in zip(wrong.lower(), candidate.lower()):
+            if w != c:
+                diff_count += 1
+                confusable = OCR_CHAR_CONFUSIONS.get(w, '')
+                reverse_confusable = OCR_CHAR_CONFUSIONS.get(c, '')
+                if c not in confusable and w not in reverse_confusable:
+                    return False  # This character difference is not an OCR confusion
+        return 0 < diff_count <= 2
+
+    # Length differs by 1: could be multi-char confusion (rn↔m, cl↔d)
+    # Accept if edit distance is 1 (insertion or deletion of one char)
+    return True
+
+
+def correct_nonword_ocr_errors(text: str, page_context: Optional[Set[str]] = None) -> str:
+    """
+    Correct OCR errors where the output is not a real English word.
+
+    Uses a spell checker to detect non-words, then filters correction
+    candidates through an OCR character confusion matrix to ensure only
+    visually plausible substitutions are applied.
+
+    This is GENERALIZABLE: it works on any English document without
+    corpus-specific dictionaries.
+
+    Safety guards:
+    - Minimum word length of 5 characters (short words are too ambiguous)
+    - Skips all-uppercase words <= 6 chars (likely acronyms: MOIST, MENT)
+    - Skips words containing digits (codes, reference numbers)
+    - Skips words with hyphens/slashes (compound words)
+    - Only applies when exactly one OCR-plausible candidate exists
+    - Logs all corrections for review
+
+    Args:
+        text: OCR text to correct
+        page_context: Optional set of lowercased words from the page
+                     (unused currently, reserved for future confidence boosting)
+
+    Returns:
+        Text with non-word OCR errors corrected
+    """
+    spell = _get_spell_checker()
+    if not spell or not text:
+        return text
+
+    words = text.split()
+    corrected_words = []
+
+    for word in words:
+        stripped = word.rstrip(':.,;!?')
+        suffix = word[len(stripped):]
+
+        # Skip words that are too short, contain digits, or look like acronyms
+        if (len(stripped) < _MIN_SPELLCHECK_LEN
+                or (stripped.isupper() and len(stripped) <= 6)
+                or any(c.isdigit() for c in stripped)
+                or '/' in stripped or '-' in stripped):
+            corrected_words.append(word)
+            continue
+
+        # Check if word is in the dictionary
+        word_lower = stripped.lower()
+        if spell.known([word_lower]):
+            corrected_words.append(word)
+            continue
+
+        # Word is NOT in dictionary — get spell checker candidates
+        candidates = spell.candidates(word_lower)
+        if not candidates:
+            corrected_words.append(word)
+            continue
+
+        # Filter to OCR-plausible candidates only
+        ocr_candidates = [c for c in candidates if _is_ocr_plausible(word_lower, c)]
+
+        if len(ocr_candidates) == 1:
+            correction = ocr_candidates[0]
+            # Preserve original case pattern
+            if stripped.isupper():
+                correction = correction.upper()
+            elif stripped[0].isupper():
+                correction = correction[0].upper() + correction[1:]
+            corrected_words.append(correction + suffix)
+            logger.debug("Non-word OCR correction: '%s' → '%s'", stripped, correction)
+        elif len(ocr_candidates) > 1:
+            # Multiple OCR-plausible candidates — pick the most common one
+            best = max(ocr_candidates, key=lambda c: spell.word_usage_frequency(c) or 0)
+            if stripped.isupper():
+                best = best.upper()
+            elif stripped[0].isupper():
+                best = best[0].upper() + best[1:]
+            corrected_words.append(best + suffix)
+            logger.debug("Non-word OCR correction (best of %d): '%s' → '%s'",
+                         len(ocr_candidates), stripped, best)
+        else:
+            corrected_words.append(word)  # No OCR-plausible correction found
+
+    return ' '.join(corrected_words)
 
 # ============================================================================
 # Offensive OCR Misread Filter (P0 - Reputational Risk)
@@ -140,59 +303,11 @@ def filter_offensive_ocr_misreads(elements: List[Dict], page_image=None,
 
 
 # ============================================================================
-# Handwriting OCR Correction
+# Prefix Restoration in Negation Context (Generalizable)
 # ============================================================================
 
-# Common TrOCR confusion pairs: (wrong_word, correct_word, context_words)
-OCR_CONFUSION_CORRECTIONS = [
-    ('last', 'lost', ['property', 'found', 'missing', 'retrieve', 'retrieving']),
-    ('book', 'look', ['neat', 'have', 'take', 'good', 'had', 'that']),
-    ('intact', 'in fact', ['no', 'not', 'but', 'actually']),
-    ('form', 'from', ['received', 'sent', 'get', 'letter', 'came']),
-    ('bock', 'back', ['come', 'go', 'went', 'came', 'get']),
-    ('sane', 'same', ['the', 'at', 'time', 'way']),
-    ('dime', 'time', ['the', 'at', 'same', 'every', 'any']),
-    ('gambetta', 'lambretta', ['negresco', 'beach', 'parked', 'opposite', 'promenade']),
-    ('negress', 'negresco', ['lambretta', 'beach', 'promenade', 'opposite', 'swim']),
-    ('angles', 'anglais', ['promenade', 'des', 'nice', 'walls', 'spumed']),
-    ('patriot', 'patriote', ['read', 'nice', 'beach', 'catastrophe', 'about']),
-    ('lobito', 'losito', ['cc', 'tahmaseb', 'baroody', 'stevens', 'registration']),
-    ('proliffements', 'requirements', []),
-    ('leaved', 'leaked', ['condition', 'shipment', 'good', 'broken', 'article']),
-    ('overlap', 'overwrap', ['filter', 'pack', 'type', 'flavoring']),
-    ('depariment', 'department', []),
-    ('engine', 'broken', ['condition', 'shipment', 'good', 'leaked']),
-    ('atterney', 'attorney', []),
-    ('decamps', 'delchamps', ['stores', 'account', 'maverick', 'distribution', 'region']),
-    ('antler', 'dantzler', ['stores', 'account', 'maverick', 'region', 'distribution']),
-    ('indoor', 'ind/lor', ['volume', 'stores', 'account', 'maverick', 'distribution']),
-    ('approve', 'approx', ['circulation', 'geographical', 'redemption', 'coupon']),
-    ('incipient', 'recipient', ['intended', 'disclosure', 'confidential', 'privileged']),
-    ('probable', 'prohibited', ['disclosure', 'confidential', 'telecopy', 'privileged']),
-]
-
-# Multi-word OCR corrections for proper nouns spanning multiple tokens.
-MULTI_WORD_OCR_CORRECTIONS = [
-    ('HAVENS GERMAN', 'HAGENS BERMAN', []),
-    ('Havens German', 'Hagens Berman', []),
-    ('Steve W. German', 'Steve W. Berman', []),
-    ('Meyer G. Follow', 'Meyer G. Koplow', []),
-    ('Rose & Kate', 'Rosen & Katz', []),
-    ('Martin Harrington', 'Martin Barrington', []),
-    ('Martin Warrington', 'Martin Barrington', []),
-    ('Farewell', 'Wardwell', ['davis', 'polk', 'law', 'counsel', 'firm']),
-    ('Ronald Einstein', 'Ronald Milstein', []),
-    ('Charles A. Bit', 'Charles A. Blixt', []),
-    ('Style Oil', 'Sayle Oil', []),
-    ('Try Green', 'Autry Greer', ['stores', 'region', 'account', 'distribution', 'maverick']),
-    ('Win Dixie', 'Winn Dixie', []),
-    ('Compact Foods', 'Compac Foods', []),
-]
-
-# Words that commonly appear with prefixes that TrOCR misses
+# Common words that TrOCR drops the prefix from in negation context
 PREFIX_CORRECTIONS = {
-    'cuckolded': 'uncuckolded',
-    'robbed': 'unrobbed',
     'fortunate': 'unfortunate',
     'known': 'unknown',
     'able': 'unable',
@@ -203,22 +318,20 @@ PREFIX_CORRECTIONS = {
     'certain': 'uncertain',
 }
 
-# Extended negation context for prefix restoration
-NEGATION_CONTEXT = ['not', "n't", 'never', 'but', 'yet', 'nor', 'neither', 'nothing', 'none', 'chosen']
+NEGATION_CONTEXT = ['not', "n't", 'never', 'but', 'yet', 'nor', 'neither', 'nothing', 'none']
 
 
 def apply_ocr_corrections(text: str, page_context: set = None) -> str:
     """
-    Apply OCR-specific corrections (confusion pairs, prefix restoration).
+    Apply generalizable OCR corrections (prefix restoration in negation context).
 
-    Uses flexible context matching -- looks for context words within a 5-word
-    window around the potentially confused word. Falls back to page-level
-    context when the element has too few words for local context matching.
+    TrOCR sometimes drops un-/dis- prefixes when the surrounding text contains
+    negation words. This restores the prefix when negation context is detected
+    within a 5-word window.
 
     Args:
         text: OCR text to correct
-        page_context: Optional set of lowercased words from all text elements
-                      on the page, used as fallback for short/standalone elements
+        page_context: Unused, kept for backwards compatibility
 
     Returns:
         Corrected text
@@ -228,47 +341,13 @@ def apply_ocr_corrections(text: str, page_context: set = None) -> str:
 
     words = text.split()
     corrected_words = []
-    context_window_size = 5
 
     for i, word in enumerate(words):
         stripped = word.rstrip(':.,;!?')
         suffix = word[len(stripped):]
 
-        window_start = max(0, i - context_window_size)
-        window_end = min(len(words), i + context_window_size + 1)
-        context_words = set(w.rstrip(':.,;!?').lower() for w in words[window_start:window_end])
-
-        # Handle compound words joined by '/' or '-'
-        for sep in ('/', '-'):
-            if sep in stripped:
-                parts = stripped.split(sep)
-                corrected_parts = []
-                for part in parts:
-                    part_lower = part.lower()
-                    part_corrected = part
-                    for wrong, correct, context in OCR_CONFUSION_CORRECTIONS:
-                        if part_lower == wrong:
-                            if not context or any(ctx in context_words for ctx in context) or (page_context and any(ctx in page_context for ctx in context)):
-                                part_corrected = correct if part.islower() else correct.upper() if part.isupper() else correct.capitalize()
-                                break
-                    corrected_parts.append(part_corrected)
-                corrected_words.append(sep.join(corrected_parts) + suffix)
-                break
-
-        # If we handled a compound word above, skip normal processing
-        if '/' in stripped or '-' in stripped:
-            continue
-
         word_lower = stripped.lower()
         corrected = stripped
-        context_words.discard(word_lower)
-
-        for wrong, correct, context in OCR_CONFUSION_CORRECTIONS:
-            if word_lower == wrong:
-                if not context or any(ctx in context_words for ctx in context) or (page_context and any(ctx in page_context for ctx in context)):
-                    corrected = correct if stripped.islower() else correct.upper() if stripped.isupper() else correct.capitalize()
-                    logger.debug("OCR correction: '%s' → '%s'", stripped, corrected)
-                    break
 
         # Check prefix restoration in negation/contrast context
         if word_lower in PREFIX_CORRECTIONS:
@@ -281,30 +360,3 @@ def apply_ocr_corrections(text: str, page_context: set = None) -> str:
         corrected_words.append(corrected + suffix)
 
     return ' '.join(corrected_words)
-
-
-def apply_multi_word_ocr_corrections(text: str, page_context: set = None) -> str:
-    """
-    Apply multi-word OCR corrections for proper nouns spanning multiple tokens.
-
-    Args:
-        text: OCR text to correct
-        page_context: Optional set of lowercased words from all text elements
-
-    Returns:
-        Text with multi-word corrections applied
-    """
-    if not text:
-        return text
-
-    text_lower = text.lower()
-
-    for wrong, correct, context in MULTI_WORD_OCR_CORRECTIONS:
-        pattern = re.compile(re.escape(wrong), re.IGNORECASE)
-        if pattern.search(text):
-            if not context or any(ctx in text_lower for ctx in context) or (page_context and any(ctx in page_context for ctx in context)):
-                logger.debug("Multi-word OCR correction: '%s' → '%s'", wrong, correct)
-                text = pattern.sub(correct, text)
-                text_lower = text.lower()
-
-    return text
