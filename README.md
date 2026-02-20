@@ -30,8 +30,8 @@ Based on regression testing with 32 ground truth documents (typed, handwritten, 
 | Metric | Value |
 |--------|-------|
 | Regression Tests | **30/32 passing** |
-| Average Flex WER | **~12.0%** |
-| Average Flex CER | **~8.2%** |
+| Average Flex WER | **~11.3%** |
+| Average Flex CER | **~7.9%** |
 
 Flexible evaluation ignores punctuation and formatting differences. Pass/fail is determined by flex CER.
 
