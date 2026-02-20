@@ -29,10 +29,10 @@ OCR_CHAR_CONFUSIONS = {
     'S': '5$',     '5': 'S$',      '$': 'S5',
     'B': '8R',     '8': 'B',       'R': 'B',
     'G': 'C6',     'C': 'GO',      '6': 'Gb',
-    'u': 'vn',     'v': 'uy',      'w': 'vv',
+    'u': 'vn',     'v': 'uy',      'w': 'v',
     'f': 't',      't': 'fi',      'r': 'v',
     'g': 'q9',     'q': 'g9',      '9': 'gq',
-    'p': 'b',      'm': 'nn',
+    'p': 'b',      'm': 'n',
 }
 
 # Minimum word length for spell-check correction (shorter words are too ambiguous)
@@ -82,9 +82,18 @@ def _is_ocr_plausible(wrong: str, candidate: str) -> bool:
                     return False  # This character difference is not an OCR confusion
         return 0 < diff_count <= 2
 
-    # Length differs by 1: could be multi-char confusion (rn↔m, cl↔d)
-    # Accept if edit distance is 1 (insertion or deletion of one char)
-    return True
+    # Length differs by 1: only accept if the differing character is OCR-confusable.
+    # Align the shorter word against the longer to find the inserted/deleted char.
+    short, long = (wrong.lower(), candidate.lower()) if len(wrong) < len(candidate) else (candidate.lower(), wrong.lower())
+    for i in range(len(long)):
+        if short == long[:i] + long[i+1:]:
+            # The extra character at position i was inserted/deleted
+            extra_char = long[i]
+            # Check if this char is in any OCR confusion pair
+            if extra_char in OCR_CHAR_CONFUSIONS or any(extra_char in v for v in OCR_CHAR_CONFUSIONS.values()):
+                return True
+            return False
+    return False
 
 
 def correct_nonword_ocr_errors(text: str, page_context: Optional[Set[str]] = None) -> str:

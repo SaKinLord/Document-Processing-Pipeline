@@ -83,22 +83,6 @@ def validate_date_format(text: str) -> dict:
 
             result['dates'].append(date_info)
 
-    # Check for corrupted date patterns
-    corrupted_patterns = [
-        (r'(\d{3}),(\d{2})(?!\d)', 'possible_corrupted_date'),
-        (r'(\d{1,2})/0/(\d{2})', 'missing_digit'),
-    ]
-
-    for pattern, issue_type in corrupted_patterns:
-        for match in re.finditer(pattern, text):
-            result['dates'].append({
-                'raw': match.group(0),
-                'format': 'corrupted',
-                'valid': False,
-                'issues': [issue_type]
-            })
-            has_suspicious = True
-
     if result['dates']:
         if has_suspicious:
             result['validation_status'] = 'suspicious'
