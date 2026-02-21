@@ -10,7 +10,6 @@ A local pipeline for extracting structured data from complex, multi-format docum
     *   **Surya OCR:** High-precision text detection and recognition for typed documents
     *   **TrOCR:** Specialized handwriting recognition with beam search (4 beams), 12px bbox padding for descenders, and punctuation spacing normalization
     *   **Table Transformer (DETR):** Table detection and structural extraction with validation scoring
-    *   **LayoutLMv3:** Document layout semantic segmentation (headers, titles, figures)
     *   **Florence-2 (VLM):** Vision-language model for object detection, captioning, and phrase grounding (signatures, handwriting, logos, seals)
 *   **Multi-Stage Post-Processing:**
     *   7-signal hallucination detection and removal
@@ -83,7 +82,7 @@ Flexible evaluation ignores punctuation and formatting differences. Pass/fail is
                      |
                      v
               LAYOUT ANALYSIS
-       LayoutLMv3 + Table Transformer + Florence-2 OD
+       Table Transformer + Florence-2 OD
                      |
                      v
              POST-PROCESSING (15 stages)
@@ -303,7 +302,7 @@ For each input file, a JSON is generated:
 }
 ```
 
-**Element types:** `text`, `table`, `layout_region`, `signature`, `logo`, `seal`, `figure`, `image`, `human face`
+**Element types:** `text`, `table`, `signature`, `logo`, `seal`, `figure`, `image`, `human face`
 
 **Text element fields:** `content`, `bbox`, `confidence` (Surya's), `source_model` (`surya`/`trocr`), `row_id`, optional `in_signature_region`, `hallucination_score`, `hallucination_signals`, `normalized_phone`, `phone_type`, `date_validation`
 
@@ -333,8 +332,7 @@ Document-Processing-Pipeline/
 │   │   └── text.py                  # Text row clustering for reading order
 │   └── models/
 │       ├── handwriting.py           # TrOCR wrapper (beam search, pooler disabled)
-│       ├── table.py                 # Table Transformer (detection + structure)
-│       └── layout.py               # LayoutLMv3 (token classification, bbox normalization)
+│       └── table.py                 # Table Transformer (detection + structure)
 ├── input/                           # Place documents here
 ├── output/                          # JSON results + visualized/ subdirectory
 └── tests/
@@ -350,7 +348,6 @@ Document-Processing-Pipeline/
 | Surya | surya v0.17 API | Primary OCR for typed text |
 | TrOCR | microsoft/trocr-large-handwritten | Handwriting recognition (beam search, 4 beams) |
 | Table Transformer | microsoft/table-transformer-detection + structure-recognition | Table detection (0.7 threshold) and structure extraction (0.5 threshold) |
-| LayoutLMv3 | microsoft/layoutlmv3-large | Document layout classification (bbox normalized to 0-1000 scale) |
 
 All models load onto GPU if available, falling back to CPU.
 

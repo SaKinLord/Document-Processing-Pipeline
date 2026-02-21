@@ -14,12 +14,10 @@ from src.utils import (
     load_image, convert_pdf_to_images, crop_image, pad_bbox,
     denoise_image, deskew_image, cluster_text_rows, is_bbox_too_large,
     classify_document_type, detect_signature_region,
-    split_line_bbox_to_words,
 )
 from src.utils.bbox import bbox_overlap_ratio_of, bboxes_intersect
 from src.models.handwriting import HandwritingRecognizer
 from src.models.table import TableRecognizer
-from src.models.layout import LayoutAnalyzer
 from src.postprocessing import (
     normalize_punctuation_spacing,
     add_phone_validation_to_element,
@@ -57,10 +55,9 @@ class DocumentProcessor:
         self.rec_predictor = RecognitionPredictor(self.rec_foundation)
 
         # Load New Specialized Models
-        logger.info("Loading specialized models (TrOCR, TableTransformer, LayoutLMv3)...")
+        logger.info("Loading specialized models (TrOCR, TableTransformer)...")
         self.handwriting_recognizer = HandwritingRecognizer(device=self.device)
         self.table_recognizer = TableRecognizer(device=self.device)
-        self.layout_analyzer = LayoutAnalyzer(device=self.device)
 
     def run_florence(self, image: Image.Image, task_prompt: str,
                      text_input: Optional[str] = None) -> Dict[str, Any]:
@@ -146,7 +143,7 @@ class DocumentProcessor:
         handwritten_regions = self._detect_handwritten_regions(image)
 
         # Surya OCR + per-line routing
-        text_elements, ocr_words, ocr_boxes, all_text_content = self._run_ocr_with_routing(
+        text_elements, all_text_content = self._run_ocr_with_routing(
             image, width, height, doc_type, doc_confidence,
             handwritten_regions, signature_info
         )
@@ -158,9 +155,6 @@ class DocumentProcessor:
         # Cluster text into reading order
         clustered_text = cluster_text_rows(text_elements)
         page_content["elements"].extend(clustered_text)
-
-        # Layout analysis (LayoutLMv3)
-        self._run_layout_analysis(image, ocr_words, ocr_boxes, page_content)
 
         # Table detection (Table Transformer)
         torch.cuda.empty_cache()
@@ -264,13 +258,11 @@ class DocumentProcessor:
         doc_type: str, doc_confidence: float,
         handwritten_regions: List[Dict[str, Any]],
         signature_info: dict
-    ) -> Tuple[List[Dict], List[str], List[List[float]], List[str]]:
+    ) -> Tuple[List[Dict], List[str]]:
         """Run Surya OCR with per-line routing to TrOCR for handwritten regions."""
         predictions = self.rec_predictor([image], ['ocr_with_boxes'], self.det_predictor)
         ocr_result = predictions[0]
 
-        ocr_words: List[str] = []
-        ocr_boxes: List[List[float]] = []
         text_elements: List[Dict] = []
         all_text_content: List[str] = []
 
@@ -295,14 +287,7 @@ class DocumentProcessor:
             text_elements.append(text_element)
             all_text_content.append(final_text)
 
-            # Collect word-level data for LayoutLMv3
-            line_words = final_text.split()
-            if line_words:
-                word_bboxes = split_line_bbox_to_words(line.bbox, line_words)
-                ocr_words.extend(line_words)
-                ocr_boxes.extend(word_bboxes)
-
-        return text_elements, ocr_words, ocr_boxes, all_text_content
+        return text_elements, all_text_content
 
     def _route_line(self, line, image: Image.Image, width: int, height: int,
                     doc_type: str, doc_confidence: float,
@@ -389,42 +374,6 @@ class DocumentProcessor:
         text_element = add_date_validation_to_element(text_element)
 
         return text_element
-
-    def _run_layout_analysis(self, image: Image.Image, ocr_words: List[str],
-                             ocr_boxes: List[List[float]],
-                             page_content: Dict[str, Any]) -> None:
-        """Run LayoutLMv3 analysis and add layout regions to page_content."""
-        try:
-            logger.info("  Running LayoutLMv3...")
-            layout_regions = self.layout_analyzer.analyze_layout(image, ocr_words, ocr_boxes)
-
-            current_region = None
-            for item in layout_regions:
-                label = item['label']
-                if label == 'O':
-                    continue
-
-                if current_region and current_region['type'] == label:
-                    b = item['bbox']
-                    current_region['bbox'] = [
-                        min(current_region['bbox'][0], b[0]),
-                        min(current_region['bbox'][1], b[1]),
-                        max(current_region['bbox'][2], b[2]),
-                        max(current_region['bbox'][3], b[3])
-                    ]
-                else:
-                    if current_region:
-                        page_content["elements"].append(current_region)
-                    current_region = {
-                        "type": "layout_region",
-                        "region_type": label,
-                        "bbox": item['bbox']
-                    }
-            if current_region:
-                page_content["elements"].append(current_region)
-
-        except (RuntimeError, ValueError) as e:
-            logger.error("  LayoutLMv3 failed: %s", e)
 
     def _detect_tables(self, image: Image.Image,
                        page_content: Dict[str, Any]) -> None:
