@@ -10,6 +10,7 @@ import logging
 from typing import Dict, List
 
 from src.utils.bbox import bbox_overlap_ratio_of_smaller
+from src.config import CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -98,7 +99,7 @@ def filter_signature_overlap_garbage(elements: List[Dict]) -> List[Dict]:
         overlaps_sig = False
         for sig_bbox in signature_bboxes:
             overlap = bbox_overlap_ratio_of_smaller(el_bbox, sig_bbox)
-            if overlap > 0.50:
+            if overlap > CONFIG.signature_overlap_threshold:
                 overlaps_sig = True
                 break
 

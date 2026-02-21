@@ -865,3 +865,233 @@ class TestCorrectNonwordOcrErrors:
         result = correct_nonword_ocr_errors("depariment: hello world")
         if "depariment" not in result:
             assert ":" in result
+
+
+# ============================================================================
+# Table Cell Extraction (build_table_cells)
+# ============================================================================
+
+from src.postprocessing.table_validation import build_table_cells
+
+
+class TestBuildTableCells:
+    def _make_table(self, bbox, rows, columns, headers=None):
+        """Helper to build a table element with structure data."""
+        return {
+            "type": "table",
+            "bbox": bbox,
+            "structure": {
+                "rows": [{"bbox": r} for r in rows],
+                "columns": [{"bbox": c} for c in columns],
+                "cells": [],
+                "headers": [{"bbox": h} for h in (headers or [])],
+            },
+        }
+
+    def test_empty_rows(self):
+        table = self._make_table([0, 0, 200, 200], rows=[], columns=[[0, 0, 100, 200]])
+        assert build_table_cells(table, []) == []
+
+    def test_empty_columns(self):
+        table = self._make_table([0, 0, 200, 200], rows=[[0, 0, 200, 50]], columns=[])
+        assert build_table_cells(table, []) == []
+
+    def test_single_cell_with_text(self):
+        table = self._make_table(
+            [0, 0, 200, 100],
+            rows=[[0, 0, 200, 100]],
+            columns=[[0, 0, 200, 100]],
+        )
+        text_elements = [
+            {"type": "text", "content": "Hello", "bbox": [10, 10, 100, 50]},
+        ]
+        cells = build_table_cells(table, text_elements)
+        assert len(cells) == 1
+        assert cells[0]["row"] == 0
+        assert cells[0]["col"] == 0
+        assert "Hello" in cells[0]["content"]
+
+    def test_multi_row_multi_col(self):
+        table = self._make_table(
+            [0, 0, 200, 200],
+            rows=[[0, 0, 200, 100], [0, 100, 200, 200]],
+            columns=[[0, 0, 100, 200], [100, 0, 200, 200]],
+        )
+        # Text in top-left cell
+        text_elements = [
+            {"type": "text", "content": "A", "bbox": [10, 10, 50, 50]},
+            # Text in bottom-right cell
+            {"type": "text", "content": "D", "bbox": [150, 150, 190, 190]},
+        ]
+        cells = build_table_cells(table, text_elements)
+        assert len(cells) == 4  # 2x2 grid
+        cell_00 = [c for c in cells if c["row"] == 0 and c["col"] == 0][0]
+        cell_11 = [c for c in cells if c["row"] == 1 and c["col"] == 1][0]
+        assert "A" in cell_00["content"]
+        assert "D" in cell_11["content"]
+
+    def test_text_outside_table_not_assigned(self):
+        table = self._make_table(
+            [0, 0, 200, 100],
+            rows=[[0, 0, 200, 100]],
+            columns=[[0, 0, 200, 100]],
+        )
+        # Text completely outside the table
+        text_elements = [
+            {"type": "text", "content": "Outside", "bbox": [300, 300, 400, 350]},
+        ]
+        cells = build_table_cells(table, text_elements)
+        assert len(cells) == 1
+        assert cells[0]["content"] == ""
+
+    def test_header_detection(self):
+        table = self._make_table(
+            [0, 0, 200, 200],
+            rows=[[0, 0, 200, 50], [0, 50, 200, 200]],
+            columns=[[0, 0, 200, 200]],
+            headers=[[0, 0, 200, 50]],
+        )
+        cells = build_table_cells(table, [])
+        header_cells = [c for c in cells if c["is_header"]]
+        non_header = [c for c in cells if not c["is_header"]]
+        assert len(header_cells) >= 1
+        assert len(non_header) >= 1
+
+    def test_invalid_table_bbox(self):
+        table = {
+            "type": "table",
+            "bbox": [10, 20],  # Invalid — only 2 elements
+            "structure": {
+                "rows": [{"bbox": [0, 0, 200, 100]}],
+                "columns": [{"bbox": [0, 0, 200, 100]}],
+                "cells": [],
+                "headers": [],
+            },
+        }
+        assert build_table_cells(table, []) == []
+
+
+# ============================================================================
+# Phone Number Normalization (normalize_phone_numbers)
+# ============================================================================
+
+from src.postprocessing.phone_date import normalize_phone_numbers
+
+
+class TestNormalizePhoneNumbers:
+    def test_standard_phone_detected(self):
+        elements = [{"type": "text", "content": "(212) 555-1234"}]
+        result = normalize_phone_numbers(elements)
+        assert "normalized_phone" in result[0]
+        assert result[0]["normalized_phone"] == "(212) 555-1234"
+
+    def test_fax_keyword_sets_phone_type(self):
+        elements = [{"type": "text", "content": "FAX: (212) 555-1234"}]
+        result = normalize_phone_numbers(elements)
+        assert result[0].get("phone_type") == "fax"
+
+    def test_date_not_detected_as_phone(self):
+        elements = [{"type": "text", "content": "12/15/2024"}]
+        result = normalize_phone_numbers(elements)
+        assert "normalized_phone" not in result[0]
+        assert "normalized_phones" not in result[0]
+
+    def test_non_text_elements_pass_through(self):
+        elements = [{"type": "table", "content": "(212) 555-1234"}]
+        result = normalize_phone_numbers(elements)
+        assert "normalized_phone" not in result[0]
+
+    def test_multiple_phones(self):
+        elements = [{"type": "text", "content": "(212) 555-1234 and (310) 555-5678"}]
+        result = normalize_phone_numbers(elements)
+        assert "normalized_phones" in result[0]
+        assert len(result[0]["normalized_phones"]) == 2
+
+    def test_no_phone_unchanged(self):
+        elements = [{"type": "text", "content": "Hello world"}]
+        result = normalize_phone_numbers(elements)
+        assert "normalized_phone" not in result[0]
+        assert "normalized_phones" not in result[0]
+        assert "phone_type" not in result[0]
+
+
+# ============================================================================
+# Signature Text Replacement
+# ============================================================================
+
+from src.postprocessing.signatures import replace_signature_text, filter_signature_overlap_garbage
+
+
+class TestReplaceSignatureText:
+    def test_received_by_pattern(self):
+        elements = [{"type": "text", "content": "RECEIVED BY: John Smith DATE:"}]
+        result = replace_signature_text(elements)
+        assert "(signature)" in result[0]["content"]
+        assert "John Smith" not in result[0]["content"]
+
+    def test_signature_colon_pattern(self):
+        elements = [{"type": "text", "content": "SIGNATURE: Jane Doe"}]
+        result = replace_signature_text(elements)
+        assert "(signature)" in result[0]["content"]
+        assert "Jane Doe" not in result[0]["content"]
+
+    def test_no_signature_pattern_unchanged(self):
+        elements = [{"type": "text", "content": "The meeting was productive"}]
+        result = replace_signature_text(elements)
+        assert result[0]["content"] == "The meeting was productive"
+
+    def test_non_text_unchanged(self):
+        elements = [{"type": "table", "content": "SIGNATURE: John"}]
+        result = replace_signature_text(elements)
+        assert result[0]["content"] == "SIGNATURE: John"
+
+
+# ============================================================================
+# Signature Overlap Garbage Filter
+# ============================================================================
+
+class TestFilterSignatureOverlapGarbage:
+    def test_single_word_overlapping_signature_removed(self):
+        elements = [
+            {"type": "signature", "bbox": [100, 100, 300, 200]},
+            {"type": "text", "content": "elevens", "bbox": [120, 120, 200, 160]},
+        ]
+        result = filter_signature_overlap_garbage(elements)
+        text_els = [e for e in result if e.get("type") == "text"]
+        assert len(text_els) == 0
+
+    def test_multi_word_kept(self):
+        elements = [
+            {"type": "signature", "bbox": [100, 100, 300, 200]},
+            {"type": "text", "content": "signed by manager", "bbox": [120, 120, 280, 160]},
+        ]
+        result = filter_signature_overlap_garbage(elements)
+        text_els = [e for e in result if e.get("type") == "text"]
+        assert len(text_els) == 1
+
+    def test_date_like_single_word_kept(self):
+        elements = [
+            {"type": "signature", "bbox": [100, 100, 300, 200]},
+            {"type": "text", "content": "12/15/2024", "bbox": [120, 120, 200, 160]},
+        ]
+        result = filter_signature_overlap_garbage(elements)
+        text_els = [e for e in result if e.get("type") == "text"]
+        assert len(text_els) == 1
+
+    def test_no_signatures_all_text_kept(self):
+        elements = [
+            {"type": "text", "content": "elevens", "bbox": [120, 120, 200, 160]},
+            {"type": "text", "content": "test", "bbox": [220, 120, 290, 160]},
+        ]
+        result = filter_signature_overlap_garbage(elements)
+        text_els = [e for e in result if e.get("type") == "text"]
+        assert len(text_els) == 2
+
+    def test_text_with_no_bbox_kept(self):
+        elements = [
+            {"type": "signature", "bbox": [100, 100, 300, 200]},
+            {"type": "text", "content": "orphan"},
+        ]
+        result = filter_signature_overlap_garbage(elements)
+        text_els = [e for e in result if e.get("type") == "text"]
+        assert len(text_els) == 1

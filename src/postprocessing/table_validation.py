@@ -9,6 +9,7 @@ import logging
 from typing import Dict, List, Tuple
 
 from src.utils.bbox import bbox_overlap_ratio_of_smaller, split_line_bbox_to_words, estimate_page_dimensions
+from src.config import CONFIG
 
 logger = logging.getLogger(__name__)
 
@@ -19,7 +20,6 @@ logger = logging.getLogger(__name__)
 # Configuration thresholds (tunable)
 MIN_TEXT_DENSITY = 0.03  # 3% minimum text coverage
 MAX_TEXT_DENSITY = 0.80  # 80% maximum (too dense = overlapping)
-MIN_STRUCTURE_SCORE = 50 # Minimum score to keep as table
 DEFAULT_COLUMN_CLUSTER_TOLERANCE = 40  # Pixels for column clustering at reference width
 DEFAULT_ROW_CLUSTER_TOLERANCE = 15     # Pixels for row clustering at reference width
 REFERENCE_PAGE_WIDTH = 1000            # Reference page width for tolerance scaling
@@ -55,7 +55,7 @@ def filter_empty_regions(elements: List[Dict]) -> List[Dict]:
     Returns:
         Filtered list with empty regions removed
     """
-    MIN_OVERLAP_RATIO = 0.3  # 30% overlap required
+    min_overlap_ratio = CONFIG.min_overlap_ratio
 
     # Separate text elements from regions
     text_elements = [e for e in elements if e.get("type") == "text"]
@@ -80,7 +80,7 @@ def filter_empty_regions(elements: List[Dict]) -> List[Dict]:
 
         has_text_overlap = False
         for text_bbox in text_bboxes:
-            if text_bbox and bbox_overlap_ratio_of_smaller(region_bbox, text_bbox) >= MIN_OVERLAP_RATIO:
+            if text_bbox and bbox_overlap_ratio_of_smaller(region_bbox, text_bbox) >= min_overlap_ratio:
                 has_text_overlap = True
                 break
 
@@ -307,7 +307,7 @@ def validate_table_structure(
         density, num_cols, num_rows, grid_coverage, confidence
     )
 
-    is_valid = score >= MIN_STRUCTURE_SCORE
+    is_valid = score >= CONFIG.min_structure_score
 
     return is_valid, score, signals
 

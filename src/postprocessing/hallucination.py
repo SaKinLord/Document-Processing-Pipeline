@@ -10,14 +10,9 @@ import logging
 from typing import Dict, List, Optional, Tuple
 
 from src.utils.bbox import estimate_page_dimensions, DEFAULT_PAGE_WIDTH, DEFAULT_PAGE_HEIGHT
+from src.config import CONFIG
 
 logger = logging.getLogger(__name__)
-
-# ============================================================================
-# Decision thresholds
-# ============================================================================
-HALLUCINATION_REMOVE_THRESHOLD = 0.50   # Score >= this → remove element
-HALLUCINATION_FLAG_THRESHOLD = 0.30     # Score > this → flag but keep
 
 # ============================================================================
 # Signal 1: Confidence (15% max weight)
@@ -121,20 +116,20 @@ def process_hallucinations(elements: List[Dict],
 
         content = element.get("content", "")
         confidence = element.get("confidence", 1.0)
-        bbox = element.get("bbox", [0, 0, 100, 100])
+        bbox = element.get("bbox", [])
 
         # Calculate hallucination score
         score, signals = calculate_hallucination_score(
             content, confidence, bbox, page_width, page_height
         )
 
-        if score >= HALLUCINATION_REMOVE_THRESHOLD:
+        if score >= CONFIG.hallucination_remove_threshold:
             # High hallucination likelihood - remove
             logger.debug("Hallucination removed (score=%.3f): %s | signals=%s",
                          score, content[:60], signals)
             removed_count += 1
             continue
-        elif score > HALLUCINATION_FLAG_THRESHOLD:
+        elif score > CONFIG.hallucination_flag_threshold:
             # Uncertain - flag but keep
             element["hallucination_flag"] = True
             element["hallucination_score"] = round(score, 3)
@@ -182,7 +177,7 @@ def filter_rotated_margin_text(elements: List[Dict],
             filtered.append(element)
             continue
 
-        bbox = element.get("bbox", [0, 0, 100, 100])
+        bbox = element.get("bbox", [])
         if len(bbox) < 4:
             filtered.append(element)
             continue

@@ -315,12 +315,13 @@ For each input file, a JSON is generated:
 Document-Processing-Pipeline/
 ├── main.py                          # Entry point
 ├── visualize_output.py              # Visualization with color-coded annotations
+├── pyproject.toml                   # Project metadata, ruff linting, pytest config
 ├── requirements.txt
 ├── src/
-│   ├── config.py                    # Centralized pipeline thresholds (routing, confidence, regions)
+│   ├── config.py                    # Centralized pipeline thresholds (routing, confidence, hallucination, table, signature)
 │   ├── processing_pipeline.py       # DocumentProcessor: model loading, per-page OCR routing
 │   ├── postprocessing/              # Post-processing pipeline (sanitize + 17 stages)
-│   │   ├── pipeline.py              # Orchestrator: postprocess_output() entry point
+│   │   ├── pipeline.py              # Orchestrator: postprocess_output() with per-step fault isolation
 │   │   ├── hallucination.py         # 7-signal hallucination scoring and removal
 │   │   ├── ocr_corrections.py       # Generalizable spell checker + OCR confusion matrix
 │   │   ├── normalization.py         # Underscore normalization, text cleaning, parenthesis repair

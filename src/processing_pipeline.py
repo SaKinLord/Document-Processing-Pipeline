@@ -198,31 +198,27 @@ class DocumentProcessor:
         return signature_info
 
     def _detect_handwritten_regions(self, image: Image.Image) -> List[Dict[str, Any]]:
-        """Detect signature and handwritten text regions using Florence-2."""
-        # Detect signature bboxes
-        signature_bboxes = []
-        try:
-            sig_results = self.run_florence(image, "<CAPTION_TO_PHRASE_GROUNDING>", text_input="signature")
-            if '<CAPTION_TO_PHRASE_GROUNDING>' in sig_results:
-                for bbox, label in zip(sig_results['<CAPTION_TO_PHRASE_GROUNDING>']['bboxes'],
-                                       sig_results['<CAPTION_TO_PHRASE_GROUNDING>']['labels']):
-                    if 'signature' in label.lower():
-                        signature_bboxes.append(bbox)
-        except (RuntimeError, ValueError) as e:
-            logger.warning("Florence-2 signature detection failed: %s", e)
-        finally:
-            torch.cuda.empty_cache()
+        """Detect signature and handwritten text regions using Florence-2.
 
-        # Detect handwriting bboxes
+        Uses a single phrase-grounding call with both phrases (period-separated)
+        to save ~1 forward pass per page.
+        """
+        signature_bboxes = []
         handwriting_bboxes = []
         try:
-            hw_results = self.run_florence(image, "<CAPTION_TO_PHRASE_GROUNDING>", text_input="handwritten text")
-            if '<CAPTION_TO_PHRASE_GROUNDING>' in hw_results:
-                for bbox, label in zip(hw_results['<CAPTION_TO_PHRASE_GROUNDING>']['bboxes'],
-                                       hw_results['<CAPTION_TO_PHRASE_GROUNDING>']['labels']):
-                    handwriting_bboxes.append(bbox)
+            results = self.run_florence(
+                image, "<CAPTION_TO_PHRASE_GROUNDING>",
+                text_input="signature. handwritten text"
+            )
+            if '<CAPTION_TO_PHRASE_GROUNDING>' in results:
+                for bbox, label in zip(results['<CAPTION_TO_PHRASE_GROUNDING>']['bboxes'],
+                                       results['<CAPTION_TO_PHRASE_GROUNDING>']['labels']):
+                    if 'signature' in label.lower():
+                        signature_bboxes.append(bbox)
+                    else:
+                        handwriting_bboxes.append(bbox)
         except (RuntimeError, ValueError) as e:
-            logger.warning("Florence-2 handwriting detection failed: %s", e)
+            logger.warning("Florence-2 handwriting/signature detection failed: %s", e)
         finally:
             torch.cuda.empty_cache()
 

@@ -152,122 +152,174 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None) -> Dict[st
             page_dims = (page_image.width, page_image.height)
 
         # Step 1: Filter empty table/layout regions
-        count_before = len(elements)
-        elements = filter_empty_regions(elements)
-        _log_step("filter_empty", count_before, len(elements))
+        try:
+            count_before = len(elements)
+            elements = filter_empty_regions(elements)
+            _log_step("filter_empty", count_before, len(elements))
+        except Exception:
+            logger.exception("  [filter_empty] failed — skipping step")
 
         # Step 2: Normalize underscore fill-in fields
-        count_before = len(elements)
-        elements = normalize_underscore_fields(elements)
-        _log_step("normalize_underscores", count_before, len(elements))
+        try:
+            count_before = len(elements)
+            elements = normalize_underscore_fields(elements)
+            _log_step("normalize_underscores", count_before, len(elements))
+        except Exception:
+            logger.exception("  [normalize_underscores] failed — skipping step")
 
         # Step 3: Validate table structure (remove false positives)
-        count_before = len(elements)
-        elements = filter_invalid_tables(elements)
-        _log_step("filter_tables", count_before, len(elements))
+        try:
+            count_before = len(elements)
+            elements = filter_invalid_tables(elements)
+            _log_step("filter_tables", count_before, len(elements))
+        except Exception:
+            logger.exception("  [filter_tables] failed — skipping step")
 
         # Step 4: Deduplicate layout regions
-        count_before = len(elements)
-        elements = deduplicate_layout_regions(elements)
-        _log_step("dedup_layout", count_before, len(elements))
+        try:
+            count_before = len(elements)
+            elements = deduplicate_layout_regions(elements)
+            _log_step("dedup_layout", count_before, len(elements))
+        except Exception:
+            logger.exception("  [dedup_layout] failed — skipping step")
 
         # Step 5: Score and handle hallucinations
-        count_before = len(elements)
-        elements = process_hallucinations(elements, page_dimensions=page_dims)
-        _log_step("hallucinations", count_before, len(elements))
+        try:
+            count_before = len(elements)
+            elements = process_hallucinations(elements, page_dimensions=page_dims)
+            _log_step("hallucinations", count_before, len(elements))
+        except Exception:
+            logger.exception("  [hallucinations] failed — skipping step")
 
         # Step 6: Filter rotated margin text (Bates numbers, vertical IDs)
-        count_before = len(elements)
-        elements = filter_rotated_margin_text(elements, page_dimensions=page_dims)
-        _log_step("rotated_margin", count_before, len(elements))
+        try:
+            count_before = len(elements)
+            elements = filter_rotated_margin_text(elements, page_dimensions=page_dims)
+            _log_step("rotated_margin", count_before, len(elements))
+        except Exception:
+            logger.exception("  [rotated_margin] failed — skipping step")
 
         # Step 7: Clean text content
-        count_before = len(elements)
-        elements = clean_text_content(elements)
-        _log_step("clean_text", count_before, len(elements))
+        try:
+            count_before = len(elements)
+            elements = clean_text_content(elements)
+            _log_step("clean_text", count_before, len(elements))
+        except Exception:
+            logger.exception("  [clean_text] failed — skipping step")
 
         # Step 8: Post-OCR classification refinement
         # If majority of text elements were sourced from TrOCR, override to handwritten
-        doc_type = page.get("document_type", "typed")
-        text_els = [e for e in elements if e.get("type") == "text" and e.get("content", "").strip()]
-        if text_els:
-            trocr_count = sum(1 for e in text_els if e.get("source_model") == "trocr")
-            trocr_ratio = trocr_count / len(text_els)
-            if trocr_ratio >= CONFIG.trocr_majority_threshold and doc_type != "handwritten":
-                original_type = doc_type
-                doc_type = "handwritten"
-                page["document_type"] = "handwritten"
-                page["classification_override"] = {
-                    "original": original_type,
-                    "reason": "trocr_majority",
-                    "trocr_ratio": round(trocr_ratio, 2)
-                }
-                logger.info("  [classification_override] %s → handwritten (TrOCR ratio: %.0f%%)",
-                            original_type, trocr_ratio * 100)
+        try:
+            doc_type = page.get("document_type", "typed")
+            text_els = [e for e in elements if e.get("type") == "text" and e.get("content", "").strip()]
+            if text_els:
+                trocr_count = sum(1 for e in text_els if e.get("source_model") == "trocr")
+                trocr_ratio = trocr_count / len(text_els)
+                if trocr_ratio >= CONFIG.trocr_majority_threshold and doc_type != "handwritten":
+                    original_type = doc_type
+                    doc_type = "handwritten"
+                    page["document_type"] = "handwritten"
+                    page["classification_override"] = {
+                        "original": original_type,
+                        "reason": "trocr_majority",
+                        "trocr_ratio": round(trocr_ratio, 2)
+                    }
+                    logger.info("  [classification_override] %s → handwritten (TrOCR ratio: %.0f%%)",
+                                original_type, trocr_ratio * 100)
+        except Exception:
+            logger.exception("  [classification_override] failed — skipping step")
+            doc_type = page.get("document_type", "typed")
 
         # Step 9: Strip spurious TrOCR trailing periods (typed/mixed docs only)
-        count_before = len(elements)
-        elements = strip_trocr_trailing_periods(elements, document_type=doc_type)
-        _log_step("trocr_period_strip", count_before, len(elements))
+        try:
+            count_before = len(elements)
+            elements = strip_trocr_trailing_periods(elements, document_type=doc_type)
+            _log_step("trocr_period_strip", count_before, len(elements))
+        except Exception:
+            logger.exception("  [trocr_period_strip] failed — skipping step")
 
         # Step 10: Repair decimal-dash confusion (.88 → -88)
-        elements = repair_decimal_dash_confusion(elements)
+        try:
+            elements = repair_decimal_dash_confusion(elements)
+        except Exception:
+            logger.exception("  [decimal_dash_repair] failed — skipping step")
 
         # Step 11: Repair dropped parentheses
-        for element in elements:
-            if element.get('type') == 'text' and element.get('content'):
-                element['content'] = repair_dropped_parentheses(element['content'])
-        logger.debug("  [paren_repair] applied to text elements")
+        try:
+            for element in elements:
+                if element.get('type') == 'text' and element.get('content'):
+                    element['content'] = repair_dropped_parentheses(element['content'])
+            logger.debug("  [paren_repair] applied to text elements")
+        except Exception:
+            logger.exception("  [paren_repair] failed — skipping step")
 
         # Step 12: Non-word OCR correction (spell checker + confusion matrix)
-        page_context = set()
-        for element in elements:
-            if element.get('type') == 'text' and element.get('content'):
-                for w in element['content'].split():
-                    page_context.add(w.rstrip(':.,;!?').lower())
-        for element in elements:
-            if element.get('type') == 'text' and element.get('content'):
-                element['content'] = correct_nonword_ocr_errors(
-                    element['content'], page_context=page_context
-                )
-        logger.debug("  [nonword_ocr_corrections] spell-checker pass complete")
+        try:
+            page_context = set()
+            for element in elements:
+                if element.get('type') == 'text' and element.get('content'):
+                    for w in element['content'].split():
+                        page_context.add(w.rstrip(':.,;!?').lower())
+            for element in elements:
+                if element.get('type') == 'text' and element.get('content'):
+                    element['content'] = correct_nonword_ocr_errors(
+                        element['content'], page_context=page_context
+                    )
+            logger.debug("  [nonword_ocr_corrections] spell-checker pass complete")
+        except Exception:
+            logger.exception("  [nonword_ocr] failed — skipping step")
 
         # Step 13: Replace signature text readings with '(signature)'
-        count_before = len(elements)
-        elements = replace_signature_text(elements)
-        _log_step("signatures", count_before, len(elements))
+        try:
+            count_before = len(elements)
+            elements = replace_signature_text(elements)
+            _log_step("signatures", count_before, len(elements))
+        except Exception:
+            logger.exception("  [signatures] failed — skipping step")
 
         # Step 14: Remove short garbage text overlapping signature regions
-        count_before = len(elements)
-        elements = filter_signature_overlap_garbage(elements)
-        _log_step("sig_garbage_filter", count_before, len(elements))
+        try:
+            count_before = len(elements)
+            elements = filter_signature_overlap_garbage(elements)
+            _log_step("sig_garbage_filter", count_before, len(elements))
+        except Exception:
+            logger.exception("  [sig_garbage_filter] failed — skipping step")
 
         # Step 15: Remove consecutive duplicate words (TrOCR beam search artifact)
-        count_before = len(elements)
-        elements = remove_consecutive_duplicate_words(elements)
-        _log_step("dedup_words", count_before, len(elements))
+        try:
+            count_before = len(elements)
+            elements = remove_consecutive_duplicate_words(elements)
+            _log_step("dedup_words", count_before, len(elements))
+        except Exception:
+            logger.exception("  [dedup_words] failed — skipping step")
 
         # Step 16: Extract table cell content from structure data
-        text_elements = [e for e in elements if e.get("type") == "text"]
-        cell_count = 0
-        for element in elements:
-            if element.get("type") == "table" and "structure" in element:
-                cells = build_table_cells(element, text_elements)
-                if cells:
-                    element["cells"] = cells
-                    element["num_rows"] = max(c["row"] for c in cells) + 1
-                    element["num_columns"] = max(c["col"] for c in cells) + 1
-                    cell_count += len(cells)
-                del element["structure"]
-        if cell_count:
-            logger.info("  [table_cells] extracted %d cells", cell_count)
-        else:
-            logger.debug("  [table_cells] no tables with structure data")
+        try:
+            text_elements = [e for e in elements if e.get("type") == "text"]
+            cell_count = 0
+            for element in elements:
+                if element.get("type") == "table" and "structure" in element:
+                    cells = build_table_cells(element, text_elements)
+                    if cells:
+                        element["cells"] = cells
+                        element["num_rows"] = max(c["row"] for c in cells) + 1
+                        element["num_columns"] = max(c["col"] for c in cells) + 1
+                        cell_count += len(cells)
+                    del element["structure"]
+            if cell_count:
+                logger.info("  [table_cells] extracted %d cells", cell_count)
+            else:
+                logger.debug("  [table_cells] no tables with structure data")
+        except Exception:
+            logger.exception("  [table_cells] failed — skipping step")
 
         # Step 17: Normalize phone numbers
-        count_before = len(elements)
-        elements = normalize_phone_numbers(elements)
-        _log_step("phones", count_before, len(elements))
+        try:
+            count_before = len(elements)
+            elements = normalize_phone_numbers(elements)
+            _log_step("phones", count_before, len(elements))
+        except Exception:
+            logger.exception("  [phones] failed — skipping step")
 
         page["elements"] = elements
 

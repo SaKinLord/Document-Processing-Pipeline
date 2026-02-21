@@ -53,6 +53,23 @@ class PipelineConfig:
     signature_trocr_gate: float = 0.90        # Strict confidence gate for signature regions
     trocr_bbox_padding: int = 12              # Pixels of padding for descenders/ascenders
 
+    # ------------------------------------------------------------------
+    # Post-processing: hallucination thresholds
+    # ------------------------------------------------------------------
+    hallucination_remove_threshold: float = 0.50   # Score >= this → remove element
+    hallucination_flag_threshold: float = 0.30     # Score > this → flag but keep
+
+    # ------------------------------------------------------------------
+    # Post-processing: table validation
+    # ------------------------------------------------------------------
+    min_structure_score: float = 50    # Minimum score to keep a detected table
+    min_overlap_ratio: float = 0.3    # 30% overlap required for region–text association
+
+    # ------------------------------------------------------------------
+    # Post-processing: signature overlap garbage filter
+    # ------------------------------------------------------------------
+    signature_overlap_threshold: float = 0.50  # Overlap ratio to classify text as signature garbage
+
 
 # Singleton used by all modules.  Import this, not PipelineConfig.
 CONFIG = PipelineConfig()
