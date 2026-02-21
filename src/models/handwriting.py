@@ -5,6 +5,8 @@ import torch
 from PIL import Image
 from transformers import TrOCRProcessor, VisionEncoderDecoderModel
 
+from src.config import CONFIG
+
 logger = logging.getLogger(__name__)
 
 
@@ -52,11 +54,16 @@ class HandwritingRecognizer:
             generated_ids = outputs.sequences
             generated_text = self.processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
 
-            # Extract confidence from beam search sequence score
-            confidence = 0.5  # fallback
+            # Extract confidence from beam search sequence score.
+            # TrOCR's sequences_scores are length-normalized log-probabilities
+            # (negative; 0.0 = perfect).  On the 32-doc validation set they
+            # range from roughly -3.0 (very uncertain) to 0.0.  Dividing by
+            # CONFIG.trocr_confidence_divisor (default 2.5) maps that range
+            # onto [0, 1] with the 50 % crossover at log_prob = -1.25.
+            confidence = 0.5  # fallback when scores unavailable
             if hasattr(outputs, 'sequences_scores') and outputs.sequences_scores is not None:
                 log_prob = outputs.sequences_scores[0].item()
-                confidence = max(0.0, min(1.0, 1.0 + log_prob / 2.5))
+                confidence = max(0.0, min(1.0, 1.0 + log_prob / CONFIG.trocr_confidence_divisor))
 
             return (generated_text, confidence)
         except (RuntimeError, ValueError, OSError) as e:

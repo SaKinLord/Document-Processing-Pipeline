@@ -316,6 +316,7 @@ Document-Processing-Pipeline/
 ├── visualize_output.py              # Visualization with color-coded annotations
 ├── requirements.txt
 ├── src/
+│   ├── config.py                    # Centralized pipeline thresholds (routing, confidence, regions)
 │   ├── processing_pipeline.py       # DocumentProcessor: model loading, per-page OCR routing
 │   ├── postprocessing/              # 17-stage post-processing pipeline (modular package)
 │   │   ├── pipeline.py              # Orchestrator: postprocess_output() entry point

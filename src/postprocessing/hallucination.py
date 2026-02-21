@@ -352,23 +352,29 @@ def is_valid_text(content: str) -> bool:
     if len(content) == 1:
         return content.isalnum() or content in ".,;:!?()[]{}\"'"
 
-    # Common patterns that are valid
-    valid_patterns = [
-        r'^[A-Za-z]{2,}$',  # Words
-        r'^[A-Za-z]+[.,;:!?]?$',  # Words with punctuation
-        r'^\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4}$',  # Dates
-        r'^\d+[.,]?\d*$',  # Numbers
-        r'^[\$\u00a3\u20ac]\d+[.,]?\d*$',  # Currency
-        r'^[A-Z]{2,}$',  # Acronyms
-        r'^[A-Z][a-z]+$',  # Capitalized words
-        r'^\(\d{3}\)\s*\d{3}[-\s]?\d{4}$',  # Phone numbers
-        r'^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}$',  # Email
-        r'^https?://',  # URLs
-        r'^www\.',  # URLs
-        r'^[A-Z][a-z]*\.?\s*$',  # Names with optional period
+    # Case-sensitive patterns — the case distinction is meaningful
+    case_sensitive_patterns = [
+        r'^[A-Z]{2,}$',                          # Acronyms (all uppercase)
+        r'^[A-Z][a-z]+$',                        # Capitalized words
+        r'^[A-Z][a-z]*\.?\s*$',                  # Names with optional period
     ]
+    for pattern in case_sensitive_patterns:
+        if re.match(pattern, content):
+            return True
 
-    for pattern in valid_patterns:
+    # Case-insensitive patterns — case doesn't matter
+    case_insensitive_patterns = [
+        r'^[A-Za-z]{2,}$',                       # Words (any case)
+        r'^[A-Za-z]+[.,;:!?]?$',                 # Words with punctuation
+        r'^\d{1,2}[/\-\.]\d{1,2}[/\-\.]\d{2,4}$',  # Dates
+        r'^\d+[.,]?\d*$',                        # Numbers
+        r'^[\$\u00a3\u20ac]\d+[.,]?\d*$',        # Currency
+        r'^\(\d{3}\)\s*\d{3}[-\s]?\d{4}$',       # Phone numbers
+        r'^[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}$',  # Email
+        r'^https?://',                            # URLs
+        r'^www\.',                                # URLs
+    ]
+    for pattern in case_insensitive_patterns:
         if re.match(pattern, content, re.IGNORECASE):
             return True
 

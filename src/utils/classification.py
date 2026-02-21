@@ -11,6 +11,8 @@ import logging
 import cv2
 import numpy as np
 
+from src.config import CONFIG
+
 logger = logging.getLogger(__name__)
 
 # ============================================================================
@@ -20,8 +22,8 @@ logger = logging.getLogger(__name__)
 # Image preprocessing
 MAX_ANALYSIS_WIDTH = 1000       # Resize images wider than this for analysis
 
-# Page region ratios
-SIGNATURE_REGION_RATIO = 0.80   # Bottom 20% of page = signature region
+# Page region ratios (signature ratio imported from centralized config)
+SIGNATURE_REGION_RATIO = CONFIG.signature_region_ratio
 HEADER_REGION_RATIO = 0.15      # Top 15% of page = fax/letterhead region
 
 # Minimum region dimensions (pixels) for analysis

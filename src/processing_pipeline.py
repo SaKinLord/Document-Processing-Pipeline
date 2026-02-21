@@ -18,6 +18,7 @@ from src.utils import (
 from src.utils.bbox import bbox_overlap_ratio_of, bboxes_intersect
 from src.models.handwriting import HandwritingRecognizer
 from src.models.table import TableRecognizer
+from src.config import CONFIG
 from src.postprocessing import (
     normalize_punctuation_spacing,
     add_phone_validation_to_element,
@@ -32,13 +33,13 @@ class DocumentProcessor:
         self.device = device
         logger.info("Loading models on %s...", self.device)
 
-        # Routing thresholds
-        self.TEXT_CONFIDENCE_THRESHOLD = 0.4
-        self.HW_REGION_MIN_CONFIDENCE = 0.15   # Lower gate for lines in detected handwriting regions
-        self.DOC_HANDWRITTEN_GATE = 0.45       # Classification confidence gate for TrOCR-only mode
-        self.TYPED_LOW_CONF_THRESHOLD = 0.60   # Below this, typed lines get TrOCR fallback
-        self.SIGNATURE_TROCR_GATE = 0.90       # Strict confidence gate for signature regions
-        self.TROCR_BBOX_PADDING = 12           # Pixels of padding for descenders/ascenders
+        # Routing thresholds (from centralized config)
+        self.TEXT_CONFIDENCE_THRESHOLD = CONFIG.text_confidence_threshold
+        self.HW_REGION_MIN_CONFIDENCE = CONFIG.hw_region_min_confidence
+        self.DOC_HANDWRITTEN_GATE = CONFIG.doc_handwritten_gate
+        self.TYPED_LOW_CONF_THRESHOLD = CONFIG.typed_low_conf_threshold
+        self.SIGNATURE_TROCR_GATE = CONFIG.signature_trocr_gate
+        self.TROCR_BBOX_PADDING = CONFIG.trocr_bbox_padding
 
         # Load Florence-2 for VLM tasks (Layout, Captioning)
         self.florence_model_id = "microsoft/Florence-2-large-ft"
@@ -191,7 +192,8 @@ class DocumentProcessor:
         signature_info = detect_signature_region(image)
         if signature_info['has_signature']:
             page_content["signature_detected"] = True
-            logger.info("  Signature region detected in bottom %d%% of page", 20)
+            logger.info("  Signature region detected in bottom %d%% of page",
+                        round((1 - CONFIG.signature_region_ratio) * 100))
         return signature_info
 
     def _detect_handwritten_regions(self, image: Image.Image) -> List[Dict[str, Any]]:
@@ -265,8 +267,12 @@ class DocumentProcessor:
         signature_info: dict
     ) -> Tuple[List[Dict], List[str]]:
         """Run Surya OCR with per-line routing to TrOCR for handwritten regions."""
-        predictions = self.rec_predictor([image], ['ocr_with_boxes'], self.det_predictor)
-        ocr_result = predictions[0]
+        try:
+            predictions = self.rec_predictor([image], ['ocr_with_boxes'], self.det_predictor)
+            ocr_result = predictions[0]
+        except (RuntimeError, ValueError, OSError) as e:
+            logger.error("Surya OCR failed: %s", e)
+            return [], []
 
         text_elements: List[Dict] = []
         all_text_content: List[str] = []
@@ -370,7 +376,7 @@ class DocumentProcessor:
         # Flag elements in signature region
         if signature_info['has_signature']:
             bbox_y_normalized = line.bbox[1] / page_height if page_height > 0 else 0
-            if bbox_y_normalized >= 0.75:
+            if bbox_y_normalized >= CONFIG.signature_region_ratio:
                 text_element["in_signature_region"] = True
                 text_element["transcription_uncertain"] = True
 

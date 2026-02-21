@@ -27,6 +27,8 @@ from .signatures import (
     replace_signature_text,
     filter_signature_overlap_garbage,
 )
+from src.config import CONFIG
+
 logger = logging.getLogger(__name__)
 
 
@@ -191,7 +193,7 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None) -> Dict[st
         if text_els:
             trocr_count = sum(1 for e in text_els if e.get("source_model") == "trocr")
             trocr_ratio = trocr_count / len(text_els)
-            if trocr_ratio >= 0.50 and doc_type != "handwritten":
+            if trocr_ratio >= CONFIG.trocr_majority_threshold and doc_type != "handwritten":
                 original_type = doc_type
                 doc_type = "handwritten"
                 page["document_type"] = "handwritten"
