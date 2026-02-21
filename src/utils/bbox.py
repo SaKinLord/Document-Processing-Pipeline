@@ -2,7 +2,48 @@
 Bounding box utilities: padding, size checks, word-level splitting, overlap calculations.
 """
 
-from typing import List
+from typing import Dict, List, Optional, Tuple
+
+# Page dimension fallbacks (US Letter in PDF points, used only when no image is available)
+DEFAULT_PAGE_WIDTH = 612
+DEFAULT_PAGE_HEIGHT = 792
+
+
+def estimate_page_dimensions(
+    elements: List[Dict],
+    page_dimensions: Optional[Tuple[int, int]] = None,
+) -> Tuple[float, float]:
+    """Estimate page width and height from element bboxes and optional image dimensions.
+
+    Uses the maximum x2/y2 coordinates across all element bboxes, then takes
+    the per-axis max with the actual image dimensions when provided.  Falls
+    back to US Letter PDF points (612x792) if neither source yields a value.
+
+    Args:
+        elements: List of element dicts with optional ``bbox`` keys.
+        page_dimensions: Optional ``(width, height)`` from the source image.
+
+    Returns:
+        ``(page_width, page_height)`` as floats.
+    """
+    page_width = 0.0
+    page_height = 0.0
+    for element in elements:
+        bbox = element.get("bbox", [])
+        if len(bbox) >= 4:
+            page_width = max(page_width, bbox[2])
+            page_height = max(page_height, bbox[3])
+
+    if page_dimensions is not None:
+        page_width = max(page_width, page_dimensions[0])
+        page_height = max(page_height, page_dimensions[1])
+
+    if page_width == 0:
+        page_width = DEFAULT_PAGE_WIDTH
+    if page_height == 0:
+        page_height = DEFAULT_PAGE_HEIGHT
+
+    return page_width, page_height
 
 
 # ============================================================================

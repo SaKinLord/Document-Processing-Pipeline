@@ -19,6 +19,7 @@ from .bbox import (
     bbox_overlap_ratio_of_smaller,
     bbox_overlap_ratio_of,
     bboxes_intersect,
+    estimate_page_dimensions,
 )
 from .classification import (
     classify_document_type,
@@ -43,6 +44,7 @@ __all__ = [
     'bbox_overlap_ratio_of_smaller',
     'bbox_overlap_ratio_of',
     'bboxes_intersect',
+    'estimate_page_dimensions',
     # Classification
     'classify_document_type',
     'detect_signature_region',

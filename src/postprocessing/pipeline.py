@@ -106,33 +106,32 @@ def deduplicate_layout_regions(elements):
     return deduplicated
 
 
-def postprocess_output(output_data: Dict[str, Any], page_images=None,
-                       handwriting_recognizer=None) -> Dict[str, Any]:
+def postprocess_output(output_data: Dict[str, Any], page_images=None) -> Dict[str, Any]:
     """
-    Apply all post-processing to OCR output.
+    Apply all post-processing to OCR output (17 stages).
 
-    Steps:
-    0. Filter empty table/layout regions (remove hallucinations)
-    0.25. Normalize underscore fill-in fields
-    0.5. Validate table structure (remove false positive tables)
-    1. Deduplicate layout regions
-    2. Score and handle hallucinations (with margin awareness)
-    2.1. Filter rotated margin text (Bates numbers, vertical IDs)
-    3. Clean text content
-    3.05. Strip spurious TrOCR trailing periods (typed/mixed docs only)
-    3.06. Repair decimal-dash confusion (.88 → -88, generalizable)
-    3.1. Repair dropped parentheses
-    3.2. Generalizable non-word OCR correction (spell checker + OCR confusion matrix)
-    3.3. Replace signature text
-    3.35. Filter signature overlap garbage (short fragments on cursive signatures)
-    3.5. Remove consecutive duplicate words (TrOCR beam search fix)
-    3.55. Extract table cell content (assign text to structure grid)
-    4. Normalize phone numbers
+    Stages:
+     1. Filter empty table/layout regions
+     2. Normalize underscore fill-in fields
+     3. Validate table structure (score 0-100; remove < 50)
+     4. Deduplicate layout regions
+     5. Score and handle hallucinations (7-signal scoring)
+     6. Filter rotated margin text (Bates numbers, vertical IDs)
+     7. Clean text content (whitespace, Unicode, markup)
+     8. Classification override (TrOCR majority → handwritten)
+     9. Strip spurious TrOCR trailing periods (typed/mixed only)
+    10. Repair decimal-dash confusion (.88 → -88)
+    11. Repair dropped parentheses
+    12. Non-word OCR correction (spell checker + confusion matrix)
+    13. Replace signature text
+    14. Filter signature overlap garbage
+    15. Remove consecutive duplicate words (TrOCR beam search fix)
+    16. Extract table cell content (assign text to structure grid)
+    17. Normalize phone numbers
 
     Args:
         output_data: Raw OCR output dictionary
         page_images: List of PIL Images per page (optional, used for page dimension derivation)
-        handwriting_recognizer: TrOCR recognizer instance (optional, unused — kept for API compatibility)
 
     Returns:
         Cleaned output dictionary
@@ -141,7 +140,7 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
         elements = page.get("elements", [])
         logger.info("Postprocessing page %d (%d elements)", page_idx + 1, len(elements))
 
-        # Step -1: Sanitize element fields (validate at the boundary)
+        # Step 0: Sanitize element fields (input validation)
         elements = sanitize_elements(elements)
 
         # Extract page image once (used for page dimension derivation)
@@ -150,42 +149,42 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
         if page_image is not None:
             page_dims = (page_image.width, page_image.height)
 
-        # Step 0: Filter empty table/layout regions
+        # Step 1: Filter empty table/layout regions
         count_before = len(elements)
         elements = filter_empty_regions(elements)
         _log_step("filter_empty", count_before, len(elements))
 
-        # Step 0.25: Normalize underscore fill-in fields
+        # Step 2: Normalize underscore fill-in fields
         count_before = len(elements)
         elements = normalize_underscore_fields(elements)
         _log_step("normalize_underscores", count_before, len(elements))
 
-        # Step 0.5: Validate table structure (remove false positives)
+        # Step 3: Validate table structure (remove false positives)
         count_before = len(elements)
         elements = filter_invalid_tables(elements)
         _log_step("filter_tables", count_before, len(elements))
 
-        # Step 1: Deduplicate layout regions
+        # Step 4: Deduplicate layout regions
         count_before = len(elements)
         elements = deduplicate_layout_regions(elements)
         _log_step("dedup_layout", count_before, len(elements))
 
-        # Step 2: Score and handle hallucinations
+        # Step 5: Score and handle hallucinations
         count_before = len(elements)
         elements = process_hallucinations(elements, page_dimensions=page_dims)
         _log_step("hallucinations", count_before, len(elements))
 
-        # Step 2.1: Filter rotated margin text (Bates numbers, vertical IDs)
+        # Step 6: Filter rotated margin text (Bates numbers, vertical IDs)
         count_before = len(elements)
         elements = filter_rotated_margin_text(elements, page_dimensions=page_dims)
         _log_step("rotated_margin", count_before, len(elements))
 
-        # Step 3: Clean text content
+        # Step 7: Clean text content
         count_before = len(elements)
         elements = clean_text_content(elements)
         _log_step("clean_text", count_before, len(elements))
 
-        # Step 3.02: Post-OCR classification refinement
+        # Step 8: Post-OCR classification refinement
         # If majority of text elements were sourced from TrOCR, override to handwritten
         doc_type = page.get("document_type", "typed")
         text_els = [e for e in elements if e.get("type") == "text" and e.get("content", "").strip()]
@@ -204,21 +203,21 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
                 logger.info("  [classification_override] %s → handwritten (TrOCR ratio: %.0f%%)",
                             original_type, trocr_ratio * 100)
 
-        # Step 3.05: Strip spurious TrOCR trailing periods (typed/mixed docs only)
+        # Step 9: Strip spurious TrOCR trailing periods (typed/mixed docs only)
         count_before = len(elements)
         elements = strip_trocr_trailing_periods(elements, document_type=doc_type)
         _log_step("trocr_period_strip", count_before, len(elements))
 
-        # Step 3.06: Repair decimal-dash confusion (.88 → -88)
+        # Step 10: Repair decimal-dash confusion (.88 → -88)
         elements = repair_decimal_dash_confusion(elements)
 
-        # Step 3.1: Repair dropped parentheses
+        # Step 11: Repair dropped parentheses
         for element in elements:
             if element.get('type') == 'text' and element.get('content'):
                 element['content'] = repair_dropped_parentheses(element['content'])
         logger.debug("  [paren_repair] applied to text elements")
 
-        # Step 3.2: Generalizable non-word OCR correction (spell checker + confusion matrix)
+        # Step 12: Non-word OCR correction (spell checker + confusion matrix)
         page_context = set()
         for element in elements:
             if element.get('type') == 'text' and element.get('content'):
@@ -231,22 +230,22 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
                 )
         logger.debug("  [nonword_ocr_corrections] spell-checker pass complete")
 
-        # Step 3.3: Replace signature text readings with '(signature)'
+        # Step 13: Replace signature text readings with '(signature)'
         count_before = len(elements)
         elements = replace_signature_text(elements)
         _log_step("signatures", count_before, len(elements))
 
-        # Step 3.35: Remove short garbage text overlapping signature regions
+        # Step 14: Remove short garbage text overlapping signature regions
         count_before = len(elements)
         elements = filter_signature_overlap_garbage(elements)
         _log_step("sig_garbage_filter", count_before, len(elements))
 
-        # Step 3.5: Remove consecutive duplicate words (TrOCR beam search artifact)
+        # Step 15: Remove consecutive duplicate words (TrOCR beam search artifact)
         count_before = len(elements)
         elements = remove_consecutive_duplicate_words(elements)
         _log_step("dedup_words", count_before, len(elements))
 
-        # Step 3.55: Extract table cell content from structure data
+        # Step 16: Extract table cell content from structure data
         text_elements = [e for e in elements if e.get("type") == "text"]
         cell_count = 0
         for element in elements:
@@ -263,7 +262,7 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None,
         else:
             logger.debug("  [table_cells] no tables with structure data")
 
-        # Step 4: Normalize phone numbers
+        # Step 17: Normalize phone numbers
         count_before = len(elements)
         elements = normalize_phone_numbers(elements)
         _log_step("phones", count_before, len(elements))

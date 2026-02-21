@@ -85,7 +85,7 @@ Flexible evaluation ignores punctuation and formatting differences. Pass/fail is
        Table Transformer + Florence-2 OD
                      |
                      v
-             POST-PROCESSING (15 stages)
+             POST-PROCESSING (17 stages)
                      |
                      v
                JSON OUTPUT
@@ -93,7 +93,7 @@ Flexible evaluation ignores punctuation and formatting differences. Pass/fail is
 
 ### Post-Processing Pipeline
 
-The post-processing pipeline in `postprocess_output()` applies 15 sequential stages:
+The post-processing pipeline in `postprocess_output()` applies 17 sequential stages:
 
 | # | Stage | Description |
 |---|-------|-------------|
@@ -104,16 +104,16 @@ The post-processing pipeline in `postprocess_output()` applies 15 sequential sta
 | 5 | Score hallucinations | 7-signal scoring; remove >= 0.50, flag > 0.30 |
 | 6 | Filter rotated margin text | Remove vertical Bates numbers at page edges |
 | 7 | Clean text content | Whitespace normalization, Unicode fixes, HTML/math markup stripping |
-| 7.5 | Classification override | If >=50% of text elements sourced from TrOCR, override page type to handwritten |
-| 8 | Strip TrOCR trailing periods | Remove spurious periods from TrOCR output (typed/mixed docs only, abbreviation-safe) |
-| 9 | Repair decimal-dash confusion | Page-level context detection; fix `.88` misread as `-88` |
-| 10 | Repair parentheses | Fix Surya's `BRANDS)` -> `BRAND(S)` pattern |
-| 11 | Non-word OCR correction | Generalizable spell checker + OCR character confusion matrix |
-| 12 | Replace signature text | Pattern-matched signature labels -> `(signature)` |
-| 13 | Filter signature garbage | Remove single-word text overlapping >50% with signature bboxes |
-| 14 | Remove duplicate words | Fix TrOCR beam search artifacts (`straight straight` -> `straight`) |
-| 15 | Extract table cells | Assign OCR text to Table Transformer's row/column grid |
-| 16 | Normalize phone numbers | Format phone numbers to `(xxx) xxx-xxxx`; detect fax vs phone |
+| 8 | Classification override | If >=50% of text elements sourced from TrOCR, override page type to handwritten |
+| 9 | Strip TrOCR trailing periods | Remove spurious periods from TrOCR output (typed/mixed docs only, abbreviation-safe) |
+| 10 | Repair decimal-dash confusion | Page-level context detection; fix `.88` misread as `-88` |
+| 11 | Repair parentheses | Fix Surya's `BRANDS)` -> `BRAND(S)` pattern |
+| 12 | Non-word OCR correction | Generalizable spell checker + OCR character confusion matrix |
+| 13 | Replace signature text | Pattern-matched signature labels -> `(signature)` |
+| 14 | Filter signature garbage | Remove single-word text overlapping >50% with signature bboxes |
+| 15 | Remove duplicate words | Fix TrOCR beam search artifacts (`straight straight` -> `straight`) |
+| 16 | Extract table cells | Assign OCR text to Table Transformer's row/column grid |
+| 17 | Normalize phone numbers | Format phone numbers to `(xxx) xxx-xxxx`; detect fax vs phone |
 
 ### Enhanced Document Classification
 
@@ -317,7 +317,7 @@ Document-Processing-Pipeline/
 ├── requirements.txt
 ├── src/
 │   ├── processing_pipeline.py       # DocumentProcessor: model loading, per-page OCR routing
-│   ├── postprocessing/              # 15-stage post-processing pipeline (modular package)
+│   ├── postprocessing/              # 17-stage post-processing pipeline (modular package)
 │   │   ├── pipeline.py              # Orchestrator: postprocess_output() entry point
 │   │   ├── hallucination.py         # 7-signal hallucination scoring and removal
 │   │   ├── ocr_corrections.py       # Generalizable spell checker + OCR confusion matrix

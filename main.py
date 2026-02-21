@@ -53,17 +53,17 @@ def main():
         logger.info("Skipped %d non-document files (e.g. .gitkeep)", skipped)
     logger.info("Found %d document files in %s", len(files), args.input_dir)
 
-    for filename in files:
+    for idx, filename in enumerate(files):
         file_path = os.path.join(args.input_dir, filename)
-        logger.info("Processing %s...", filename)
+        file_start = time.time()
+        logger.info("Processing [%d/%d] %s...", idx + 1, len(files), filename)
 
         output_filename = os.path.splitext(filename)[0] + ".json"
         output_file_path = os.path.join(args.output_dir, output_filename)
 
         try:
             doc_data, page_images = processor.process_document(file_path)
-            doc_data = postprocess_output(doc_data, page_images=page_images,
-                                          handwriting_recognizer=processor.handwriting_recognizer)
+            doc_data = postprocess_output(doc_data, page_images=page_images)
             with open(output_file_path, "w", encoding="utf-8") as f:
                 json.dump(doc_data, f, indent=2, ensure_ascii=False)
         except Exception as e:
@@ -71,6 +71,7 @@ def main():
             error_data = {"filename": filename, "error": str(e)}
             with open(output_file_path, "w", encoding="utf-8") as f:
                 json.dump(error_data, f, indent=2, ensure_ascii=False)
+        logger.info("  Finished [%d/%d] %s (%.1fs)", idx + 1, len(files), filename, time.time() - file_start)
 
     logger.info("Processing complete in %.2fs. Results saved to %s", time.time() - start_time, args.output_dir)
 

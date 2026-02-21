@@ -8,7 +8,7 @@ and extraction of cell-level content from Table Transformer structure data.
 import logging
 from typing import Dict, List, Tuple
 
-from src.utils.bbox import bbox_overlap_ratio_of_smaller, split_line_bbox_to_words
+from src.utils.bbox import bbox_overlap_ratio_of_smaller, split_line_bbox_to_words, estimate_page_dimensions
 
 logger = logging.getLogger(__name__)
 
@@ -30,17 +30,13 @@ REFERENCE_PAGE_WIDTH = 1000            # Reference page width for tolerance scal
 def _scaled_tolerances(elements: List[Dict]) -> Tuple[float, float]:
     """Compute column/row clustering tolerances scaled to actual page width.
 
-    Uses the maximum x2 coordinate across all element bboxes as a proxy for
-    page width, then scales the default tolerances proportionally.
+    Uses the shared ``estimate_page_dimensions`` utility to determine page
+    width, then scales the default tolerances proportionally.
 
     Returns:
         (col_tolerance, row_tolerance) scaled to actual page width
     """
-    page_width = 0
-    for element in elements:
-        bbox = element.get("bbox", [])
-        if len(bbox) >= 4:
-            page_width = max(page_width, bbox[2])
+    page_width, _ = estimate_page_dimensions(elements)
     if page_width <= 0:
         return DEFAULT_COLUMN_CLUSTER_TOLERANCE, DEFAULT_ROW_CLUSTER_TOLERANCE
 

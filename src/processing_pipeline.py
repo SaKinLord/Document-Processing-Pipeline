@@ -32,8 +32,13 @@ class DocumentProcessor:
         self.device = device
         logger.info("Loading models on %s...", self.device)
 
-        # Thresholds
+        # Routing thresholds
         self.TEXT_CONFIDENCE_THRESHOLD = 0.4
+        self.HW_REGION_MIN_CONFIDENCE = 0.15   # Lower gate for lines in detected handwriting regions
+        self.DOC_HANDWRITTEN_GATE = 0.45       # Classification confidence gate for TrOCR-only mode
+        self.TYPED_LOW_CONF_THRESHOLD = 0.60   # Below this, typed lines get TrOCR fallback
+        self.SIGNATURE_TROCR_GATE = 0.90       # Strict confidence gate for signature regions
+        self.TROCR_BBOX_PADDING = 12           # Pixels of padding for descenders/ascenders
 
         # Load Florence-2 for VLM tasks (Layout, Captioning)
         self.florence_model_id = "microsoft/Florence-2-large-ft"
@@ -272,7 +277,7 @@ class DocumentProcessor:
                 bboxes_intersect(line.bbox, r['bbox'])
                 for r in handwritten_regions
             )
-            min_confidence = 0.15 if in_hw_region else self.TEXT_CONFIDENCE_THRESHOLD
+            min_confidence = self.HW_REGION_MIN_CONFIDENCE if in_hw_region else self.TEXT_CONFIDENCE_THRESHOLD
             if line.confidence < min_confidence:
                 continue
 
@@ -308,11 +313,11 @@ class DocumentProcessor:
 
         if line_hw_region_type is not None:
             use_ensemble = True
-        elif doc_type == "handwritten" and doc_confidence >= 0.45:
+        elif doc_type == "handwritten" and doc_confidence >= self.DOC_HANDWRITTEN_GATE:
             run_handwriting_model = True
-        elif doc_type == "mixed" or doc_confidence < 0.45:
+        elif doc_type == "mixed" or doc_confidence < self.DOC_HANDWRITTEN_GATE:
             use_ensemble = True
-        elif doc_type == "typed" and line.confidence < 0.6:
+        elif doc_type == "typed" and line.confidence < self.TYPED_LOW_CONF_THRESHOLD:
             if len(line.text.strip()) > 0:
                 run_handwriting_model = True
 
@@ -321,10 +326,10 @@ class DocumentProcessor:
                 line, image, width, height, line_hw_region_type
             )
         elif run_handwriting_model:
-            padded_bbox = pad_bbox(line.bbox, 12, width, height)
+            padded_bbox = pad_bbox(line.bbox, self.TROCR_BBOX_PADDING, width, height)
             line_crop = crop_image(image, padded_bbox)
             hw_text, hw_conf = self.handwriting_recognizer.recognize(line_crop)
-            if hw_text and len(hw_text.strip()) > 0 and hw_conf >= 0.15:
+            if hw_text and len(hw_text.strip()) > 0 and hw_conf >= self.HW_REGION_MIN_CONFIDENCE:
                 final_text = normalize_punctuation_spacing(hw_text)
                 source_model = "trocr"
 
@@ -333,7 +338,7 @@ class DocumentProcessor:
     def _run_ensemble(self, line, image: Image.Image, width: int, height: int,
                       line_hw_region_type: Optional[str]) -> Tuple[str, str]:
         """Run both Surya and TrOCR, pick the better result."""
-        padded_bbox = pad_bbox(line.bbox, 12, width, height)
+        padded_bbox = pad_bbox(line.bbox, self.TROCR_BBOX_PADDING, width, height)
         line_crop = crop_image(image, padded_bbox)
         hw_text, hw_conf = self.handwriting_recognizer.recognize(line_crop)
 
@@ -341,8 +346,8 @@ class DocumentProcessor:
         trocr_valid = hw_text and len(hw_text.strip()) > 0
 
         if line_hw_region_type == 'signature':
-            # Signature regions: require high TrOCR confidence (0.90 gate)
-            if trocr_valid and hw_conf > surya_conf and hw_conf >= 0.90:
+            # Signature regions: require high TrOCR confidence
+            if trocr_valid and hw_conf > surya_conf and hw_conf >= self.SIGNATURE_TROCR_GATE:
                 return normalize_punctuation_spacing(hw_text), "trocr"
             return line.text, "surya"
         else:
@@ -407,48 +412,51 @@ class DocumentProcessor:
     def _detect_visual_elements(self, image: Image.Image, width: int, height: int,
                                 page_content: Dict[str, Any]) -> None:
         """Run Florence-2 object detection and phrase grounding for visual elements."""
-        # Generic Object Detection
-        od_results = self.run_florence(image, "<OD>")
+        try:
+            # Generic Object Detection
+            od_results = self.run_florence(image, "<OD>")
 
-        if '<OD>' in od_results:
-            bboxes = od_results['<OD>']['bboxes']
-            labels = od_results['<OD>']['labels']
+            if '<OD>' in od_results:
+                bboxes = od_results['<OD>']['bboxes']
+                labels = od_results['<OD>']['labels']
 
-            for bbox, label in zip(bboxes, labels):
-                label_clean = label.lower()
+                for bbox, label in zip(bboxes, labels):
+                    label_clean = label.lower()
 
-                if is_bbox_too_large(bbox, width, height, label=label_clean):
-                    continue
+                    if is_bbox_too_large(bbox, width, height, label=label_clean):
+                        continue
 
-                if any(x in label_clean for x in ['image', 'figure', 'chart', 'plot',
-                                                    'diagram', 'map', 'table', 'picture',
-                                                    'human face']):
-                    crop = crop_image(image, bbox)
-                    description = self.run_florence(crop, "<MORE_DETAILED_CAPTION>")
-                    caption = description.get('<MORE_DETAILED_CAPTION>', "")
+                    if any(x in label_clean for x in ['image', 'figure', 'chart', 'plot',
+                                                        'diagram', 'map', 'table', 'picture',
+                                                        'human face']):
+                        crop = crop_image(image, bbox)
+                        description = self.run_florence(crop, "<MORE_DETAILED_CAPTION>")
+                        caption = description.get('<MORE_DETAILED_CAPTION>', "")
+
+                        page_content["elements"].append({
+                            "type": label_clean,
+                            "bbox": bbox,
+                            "description": caption
+                        })
+
+            # Targeted Phrase Grounding for semantic elements
+            target_phrases = "logo. seal. signature. graphic."
+            pg_results = self.run_florence(image, "<CAPTION_TO_PHRASE_GROUNDING>", text_input=target_phrases)
+
+            if '<CAPTION_TO_PHRASE_GROUNDING>' in pg_results:
+                bboxes = pg_results['<CAPTION_TO_PHRASE_GROUNDING>']['bboxes']
+                labels = pg_results['<CAPTION_TO_PHRASE_GROUNDING>']['labels']
+
+                for bbox, label in zip(bboxes, labels):
+                    label_clean = label.lower()
+
+                    if is_bbox_too_large(bbox, width, height, label=label_clean):
+                        continue
 
                     page_content["elements"].append({
                         "type": label_clean,
                         "bbox": bbox,
-                        "description": caption
+                        "description": f"Detected {label}"
                     })
-
-        # Targeted Phrase Grounding for semantic elements
-        target_phrases = "logo. seal. signature. graphic."
-        pg_results = self.run_florence(image, "<CAPTION_TO_PHRASE_GROUNDING>", text_input=target_phrases)
-
-        if '<CAPTION_TO_PHRASE_GROUNDING>' in pg_results:
-            bboxes = pg_results['<CAPTION_TO_PHRASE_GROUNDING>']['bboxes']
-            labels = pg_results['<CAPTION_TO_PHRASE_GROUNDING>']['labels']
-
-            for bbox, label in zip(bboxes, labels):
-                label_clean = label.lower()
-
-                if is_bbox_too_large(bbox, width, height, label=label_clean):
-                    continue
-
-                page_content["elements"].append({
-                    "type": label_clean,
-                    "bbox": bbox,
-                    "description": f"Detected {label}"
-                })
+        except (RuntimeError, ValueError) as e:
+            logger.error("  Visual element detection failed: %s", e)

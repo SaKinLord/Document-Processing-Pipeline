@@ -9,7 +9,81 @@ import re
 import logging
 from typing import Dict, List, Optional, Tuple
 
+from src.utils.bbox import estimate_page_dimensions, DEFAULT_PAGE_WIDTH, DEFAULT_PAGE_HEIGHT
+
 logger = logging.getLogger(__name__)
+
+# ============================================================================
+# Decision thresholds
+# ============================================================================
+HALLUCINATION_REMOVE_THRESHOLD = 0.50   # Score >= this → remove element
+HALLUCINATION_FLAG_THRESHOLD = 0.30     # Score > this → flag but keep
+
+# ============================================================================
+# Signal 1: Confidence (15% max weight)
+# ============================================================================
+CONFIDENCE_VERY_LOW = 0.50              # Below this → very_low_confidence
+CONFIDENCE_VERY_LOW_WEIGHT = 0.15
+CONFIDENCE_LOW = 0.70                   # Below this → low_confidence
+CONFIDENCE_LOW_WEIGHT = 0.10
+CONFIDENCE_MODERATE = 0.85              # Below this → slight penalty
+CONFIDENCE_MODERATE_WEIGHT = 0.05
+
+# ============================================================================
+# Signal 2: Text length (10% max weight)
+# ============================================================================
+TEXT_VERY_SHORT_MAX = 2                 # <= this many chars → very_short
+TEXT_VERY_SHORT_WEIGHT = 0.10
+TEXT_SHORT_MAX = 4                      # <= this many chars → short
+TEXT_SHORT_WEIGHT = 0.06
+
+# ============================================================================
+# Signal 3: Character patterns (25% max weight, applied as multiplier)
+# ============================================================================
+CHAR_PATTERN_WEIGHT = 0.25
+ALL_SAME_CHAR_SCORE = 0.8              # All identical characters
+ISOLATED_DIGITS_MAX_LEN = 3            # Max length for isolated_digits signal
+ISOLATED_DIGITS_SCORE = 0.30
+SHORT_NUMBERS_MAX_LEN = 4              # Max length for short_numbers signal
+SHORT_NUMBERS_SCORE = 0.35
+PUNCTUATION_ONLY_SCORE = 0.6           # All punctuation characters
+UNUSUAL_CHARS_SCORE = 0.3              # Non-ASCII outside Latin Extended
+ISOLATED_YEAR_SCORE = 0.25             # Lone year (e.g. "1998")
+
+# ============================================================================
+# Signal 4: Bbox anomaly (15% max weight)
+# ============================================================================
+BBOX_MIN_WIDTH = 20                    # Pixels — below this → tiny_bbox
+BBOX_MIN_HEIGHT = 10                   # Pixels — below this → tiny_bbox
+BBOX_TINY_WEIGHT = 0.15
+BBOX_ASPECT_RATIO_MAX = 5              # height/width — above this → abnormal
+BBOX_ABNORMAL_ASPECT_WEIGHT = 0.10
+
+# ============================================================================
+# Signal 5: Valid text check (15% weight)
+# ============================================================================
+INVALID_TEXT_WEIGHT = 0.15
+VALID_TEXT_MULTIWORD_MIN_LEN = 5       # Multi-word text longer than this → valid
+VALID_TEXT_ALNUM_RATIO = 0.7           # Alphanumeric ratio above this → valid
+
+# ============================================================================
+# Signal 6: Repetition (10% weight)
+# ============================================================================
+REPETITION_WEIGHT = 0.10
+
+# ============================================================================
+# Signal 7: Margin position (10-25% weight depending on length)
+# ============================================================================
+MARGIN_EDGE_THRESHOLD = 0.03           # 3% of page width — outer edge
+MARGIN_INNER_THRESHOLD = 0.10          # 10% of page width — inner boundary
+MARGIN_SHORT_FRAGMENT_WEIGHT = 0.25    # Short non-numeric margin fragment
+MARGIN_LONG_WEIGHT = 0.10             # Longer text at margin
+
+# ============================================================================
+# Rotated margin text filter
+# ============================================================================
+ROTATED_RIGHT_EDGE_THRESHOLD = 0.92    # Text starting past 92% of page width
+ROTATED_NARROW_THRESHOLD = 0.04        # Max 4% of page width for narrow bbox
 
 
 def process_hallucinations(elements: List[Dict],
@@ -25,34 +99,16 @@ def process_hallucinations(elements: List[Dict],
     - Bbox size anomaly (15%)
     - Dictionary check (15%)
     - Repetition patterns (10%)
-    - Margin position (10%)
+    - Margin position (10-25%)
 
     Args:
         elements: List of element dictionaries
         page_dimensions: Optional (width, height) from the source image.
-                         When provided, uses max(bbox_estimated, actual) per axis
-                         so that bboxes not spanning the full page still work.
 
     Returns:
         Processed elements with hallucinations handled
     """
-    # Estimate page dimensions from all element bboxes
-    page_width = 0
-    page_height = 0
-    for element in elements:
-        bbox = element.get("bbox", [])
-        if len(bbox) >= 4:
-            page_width = max(page_width, bbox[2])
-            page_height = max(page_height, bbox[3])
-    # Incorporate actual page dimensions when available
-    if page_dimensions is not None:
-        page_width = max(page_width, page_dimensions[0])
-        page_height = max(page_height, page_dimensions[1])
-    # Fallback if still unknown
-    if page_width == 0:
-        page_width = 612  # Standard letter width in points
-    if page_height == 0:
-        page_height = 792
+    page_width, page_height = estimate_page_dimensions(elements, page_dimensions)
 
     processed = []
     removed_count = 0
@@ -72,14 +128,14 @@ def process_hallucinations(elements: List[Dict],
             content, confidence, bbox, page_width, page_height
         )
 
-        if score >= 0.50:
-            # High hallucination likelihood - remove (tightened from > 0.50)
+        if score >= HALLUCINATION_REMOVE_THRESHOLD:
+            # High hallucination likelihood - remove
             logger.debug("Hallucination removed (score=%.3f): %s | signals=%s",
                          score, content[:60], signals)
             removed_count += 1
             continue
-        elif score > 0.30:
-            # Uncertain - flag but keep (tightened from 0.40)
+        elif score > HALLUCINATION_FLAG_THRESHOLD:
+            # Uncertain - flag but keep
             element["hallucination_flag"] = True
             element["hallucination_score"] = round(score, 3)
             element["hallucination_signals"] = signals
@@ -116,16 +172,8 @@ def filter_rotated_margin_text(elements: List[Dict],
     Returns:
         Filtered elements with rotated margin fragments removed
     """
-    # Estimate page width from all element bboxes
-    page_width = 0
-    for element in elements:
-        bbox = element.get("bbox", [])
-        if len(bbox) >= 4:
-            page_width = max(page_width, bbox[2])
-    # Incorporate actual page width when available
-    if page_dimensions is not None:
-        page_width = max(page_width, page_dimensions[0])
-    if page_width == 0:
+    page_width, _ = estimate_page_dimensions(elements, page_dimensions)
+    if page_width <= 0:
         return elements  # Can't determine margins without bboxes
 
     filtered = []
@@ -142,8 +190,8 @@ def filter_rotated_margin_text(elements: List[Dict],
         content = element.get("content", "").strip()
         bbox_width = bbox[2] - bbox[0]
         # Rotated margin text: starts in rightmost 8% of page AND very narrow
-        at_right_edge = bbox[0] > page_width * 0.92
-        very_narrow = bbox_width < page_width * 0.04
+        at_right_edge = bbox[0] > page_width * ROTATED_RIGHT_EDGE_THRESHOLD
+        very_narrow = bbox_width < page_width * ROTATED_NARROW_THRESHOLD
 
         if at_right_edge and very_narrow:
             # Exempt digit-only content (Bates numbers, document IDs)
@@ -161,8 +209,8 @@ def calculate_hallucination_score(
     content: str,
     confidence: float,
     bbox: List[float],
-    page_width: float = 612,
-    page_height: float = 792
+    page_width: float = DEFAULT_PAGE_WIDTH,
+    page_height: float = DEFAULT_PAGE_HEIGHT
 ) -> Tuple[float, List[str]]:
     """
     Calculate hallucination likelihood score from multiple signals.
@@ -173,68 +221,69 @@ def calculate_hallucination_score(
     score = 0.0
     signals = []
 
-    # Signal 1: Low confidence (15% weight)
-    if confidence < 0.50:
-        score += 0.15
+    # Signal 1: Low confidence (15% max weight)
+    if confidence < CONFIDENCE_VERY_LOW:
+        score += CONFIDENCE_VERY_LOW_WEIGHT
         signals.append("very_low_confidence")
-    elif confidence < 0.70:
-        score += 0.10
+    elif confidence < CONFIDENCE_LOW:
+        score += CONFIDENCE_LOW_WEIGHT
         signals.append("low_confidence")
-    elif confidence < 0.85:
-        score += 0.05
+    elif confidence < CONFIDENCE_MODERATE:
+        score += CONFIDENCE_MODERATE_WEIGHT
 
-    # Signal 2: Very short text (10% weight)
+    # Signal 2: Very short text (10% max weight)
     text_len = len(content.strip())
-    if text_len <= 2:
-        score += 0.10
+    if text_len <= TEXT_VERY_SHORT_MAX:
+        score += TEXT_VERY_SHORT_WEIGHT
         signals.append("very_short")
-    elif text_len <= 4:
-        score += 0.06
+    elif text_len <= TEXT_SHORT_MAX:
+        score += TEXT_SHORT_WEIGHT
         signals.append("short")
 
-    # Signal 3: Character pattern anomalies (25% weight)
+    # Signal 3: Character pattern anomalies (25% max weight)
     pattern_score, pattern_signals = check_character_patterns(content)
-    score += pattern_score * 0.25
+    score += pattern_score * CHAR_PATTERN_WEIGHT
     signals.extend(pattern_signals)
 
-    # Signal 4: Bbox size anomaly (15% weight)
+    # Signal 4: Bbox size anomaly (15% max weight)
     if len(bbox) >= 4:
         width = bbox[2] - bbox[0]
         height = bbox[3] - bbox[1]
 
         # Very small bbox
-        if width < 20 or height < 10:
-            score += 0.15
+        if width < BBOX_MIN_WIDTH or height < BBOX_MIN_HEIGHT:
+            score += BBOX_TINY_WEIGHT
             signals.append("tiny_bbox")
-        # Extremely wide aspect ratio (likely noise)
-        elif width > 0 and height / width > 5:
-            score += 0.10
+        # Extremely tall aspect ratio (likely noise)
+        elif width > 0 and height / width > BBOX_ASPECT_RATIO_MAX:
+            score += BBOX_ABNORMAL_ASPECT_WEIGHT
             signals.append("abnormal_aspect")
 
     # Signal 5: Not a recognizable word/pattern (15% weight)
     if not is_valid_text(content):
-        score += 0.15
+        score += INVALID_TEXT_WEIGHT
         signals.append("not_valid_text")
 
     # Signal 6: Repetition patterns (10% weight)
     if has_repetition_pattern(content):
-        score += 0.10
+        score += REPETITION_WEIGHT
         signals.append("repetition")
 
-    # Signal 7: Margin position (10% weight)
+    # Signal 7: Margin position (10-25% weight depending on fragment length)
     if len(bbox) >= 4 and page_width > 0:
-        margin_threshold = 0.03  # 3% of page dimension
-        at_left_margin = bbox[0] < page_width * margin_threshold and bbox[2] < page_width * 0.10
-        at_right_margin = bbox[0] > page_width * (1 - 0.10) and bbox[2] > page_width * (1 - margin_threshold)
+        at_left_margin = (bbox[0] < page_width * MARGIN_EDGE_THRESHOLD
+                          and bbox[2] < page_width * MARGIN_INNER_THRESHOLD)
+        at_right_margin = (bbox[0] > page_width * (1 - MARGIN_INNER_THRESHOLD)
+                           and bbox[2] > page_width * (1 - MARGIN_EDGE_THRESHOLD))
         is_page_number = content.strip().isdigit()
         if (at_left_margin or at_right_margin) and not is_page_number:
-            if text_len <= 4:
+            if text_len <= TEXT_SHORT_MAX:
                 # Short non-numeric fragment at margin
-                score += 0.25
+                score += MARGIN_SHORT_FRAGMENT_WEIGHT
                 signals.append("margin_fragment_short")
             else:
                 # Longer text at margin
-                score += 0.10
+                score += MARGIN_LONG_WEIGHT
                 signals.append("margin_position")
 
     return min(score, 1.0), signals
@@ -252,22 +301,22 @@ def check_character_patterns(content: str) -> Tuple[float, List[str]]:
 
     # All same character
     if len(set(content.replace(" ", ""))) == 1 and len(content) > 2:
-        score += 0.8
+        score += ALL_SAME_CHAR_SCORE
         patterns.append("all_same_char")
 
     stripped = content.strip()
 
     # Only digits / short numbers -- mutually exclusive to avoid double-counting.
-    if stripped.isdigit() and len(stripped) <= 3:
-        score += 0.30
+    if stripped.isdigit() and len(stripped) <= ISOLATED_DIGITS_MAX_LEN:
+        score += ISOLATED_DIGITS_SCORE
         patterns.append("isolated_digits")
-    elif re.match(r'^[\d\s]+$', stripped) and len(stripped) <= 4:
-        score += 0.35
+    elif re.match(r'^[\d\s]+$', stripped) and len(stripped) <= SHORT_NUMBERS_MAX_LEN:
+        score += SHORT_NUMBERS_SCORE
         patterns.append("short_numbers")
 
     # Only punctuation
     if all(c in ".,;:!?-_'" for c in content.replace(" ", "")):
-        score += 0.6
+        score += PUNCTUATION_ONLY_SCORE
         patterns.append("only_punctuation")
 
     # Non-printable or unusual characters -- allow Latin Extended
@@ -277,12 +326,12 @@ def check_character_patterns(content: str) -> Tuple[float, List[str]]:
         and not (0x1E00 <= ord(c) <= 0x1EFF)
         for c in content
     ):
-        score += 0.3
+        score += UNUSUAL_CHARS_SCORE
         patterns.append("unusual_chars")
 
     # Isolated year patterns (common hallucinations from fine print)
     if re.match(r'^(19|20)\d{2}s?$', stripped):
-        score += 0.25
+        score += ISOLATED_YEAR_SCORE
         patterns.append("isolated_year")
 
     return min(score, 1.0), patterns
@@ -324,12 +373,12 @@ def is_valid_text(content: str) -> bool:
             return True
 
     # Multi-word text is usually valid
-    if ' ' in content and len(content) > 5:
+    if ' ' in content and len(content) > VALID_TEXT_MULTIWORD_MIN_LEN:
         return True
 
     # Check if mostly alphanumeric
     alnum_ratio = sum(1 for c in content if c.isalnum()) / len(content)
-    if alnum_ratio > 0.7:
+    if alnum_ratio > VALID_TEXT_ALNUM_RATIO:
         return True
 
     return False
