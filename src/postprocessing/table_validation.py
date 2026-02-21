@@ -17,8 +17,6 @@ logger = logging.getLogger(__name__)
 # ============================================================================
 
 # Configuration thresholds (tunable)
-MIN_COLUMNS = 2          # Minimum columns to be considered a table
-MIN_ROWS = 2             # Minimum rows to be considered a table
 MIN_TEXT_DENSITY = 0.03  # 3% minimum text coverage
 MAX_TEXT_DENSITY = 0.80  # 80% maximum (too dense = overlapping)
 MIN_STRUCTURE_SCORE = 50 # Minimum score to keep as table

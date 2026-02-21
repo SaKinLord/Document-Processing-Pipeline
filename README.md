@@ -32,7 +32,7 @@ Based on regression testing with 32 ground truth documents (typed, handwritten, 
 | Average Flex WER | **~11.3%** |
 | Average Flex CER | **~7.9%** |
 
-Flexible evaluation ignores punctuation and formatting differences. Pass/fail is determined by flex CER.
+Flexible evaluation ignores punctuation and formatting differences. Pass/fail requires **both** flex WER and flex CER to be within thresholds.
 
 **Per-document thresholds:**
 
@@ -56,7 +56,7 @@ Flexible evaluation ignores punctuation and formatting differences. Pass/fail is
                      8-FEATURE CLASSIFIER
     Stroke Variance | Line Regularity | Angle Variance
     Edge Density | Form Structure | Character Uniformity
-    Signature Isolation | Fax Header | Ruled Paper Detection
+         Signature Isolation | Fax Header
                               |
                               v
                   FLORENCE-2 PHRASE GROUNDING
@@ -93,10 +93,11 @@ Flexible evaluation ignores punctuation and formatting differences. Pass/fail is
 
 ### Post-Processing Pipeline
 
-The post-processing pipeline in `postprocess_output()` applies 17 sequential stages:
+The post-processing pipeline in `postprocess_output()` applies a sanitize pre-step followed by 17 sequential stages:
 
 | # | Stage | Description |
 |---|-------|-------------|
+| 0 | Sanitize elements | Validate and coerce element fields (type, content, bbox) at the pipeline boundary |
 | 1 | Filter empty regions | Remove tables/layout regions with <30% text overlap |
 | 2 | Normalize underscores | Standardize form fields (`Name:____` -> `Name: ___`) |
 | 3 | Validate table structure | Score tables 0-100; remove if score < 50 |
@@ -191,7 +192,7 @@ This approach is fully generalizable — it works on any English document withou
 ## Setup
 
 ### Prerequisites
-*   **OS:** Windows / Linux
+*   **OS:** Windows / Linux (primarily tested on Google Colab with GPU runtime)
 *   **Hardware:** NVIDIA GPU (8GB+ VRAM recommended)
 *   **Python:** 3.10+
 
@@ -318,7 +319,7 @@ Document-Processing-Pipeline/
 ├── src/
 │   ├── config.py                    # Centralized pipeline thresholds (routing, confidence, regions)
 │   ├── processing_pipeline.py       # DocumentProcessor: model loading, per-page OCR routing
-│   ├── postprocessing/              # 17-stage post-processing pipeline (modular package)
+│   ├── postprocessing/              # Post-processing pipeline (sanitize + 17 stages)
 │   │   ├── pipeline.py              # Orchestrator: postprocess_output() entry point
 │   │   ├── hallucination.py         # 7-signal hallucination scoring and removal
 │   │   ├── ocr_corrections.py       # Generalizable spell checker + OCR confusion matrix
@@ -337,7 +338,8 @@ Document-Processing-Pipeline/
 ├── input/                           # Place documents here
 ├── output/                          # JSON results + visualized/ subdirectory
 └── tests/
-    ├── test_accuracy.py             # WER/CER regression tests
+    ├── test_accuracy.py             # WER/CER regression tests (32-doc validation set)
+    ├── test_postprocessing.py       # Unit tests for postprocessing functions
     └── flexible_evaluation.py       # Punctuation-insensitive evaluator
 ```
 
@@ -346,7 +348,7 @@ Document-Processing-Pipeline/
 | Model | Source | Purpose |
 |-------|--------|---------|
 | Florence-2 | microsoft/Florence-2-large-ft | Phrase grounding (signatures, handwriting), object detection, captioning |
-| Surya | surya v0.17 API | Primary OCR for typed text |
+| Surya | surya-ocr (>=0.4.0) | Primary OCR for typed text |
 | TrOCR | microsoft/trocr-large-handwritten | Handwriting recognition (beam search, 4 beams) |
 | Table Transformer | microsoft/table-transformer-detection + structure-recognition | Table detection (0.7 threshold) and structure extraction (0.5 threshold) |
 
@@ -363,12 +365,14 @@ All models load onto GPU if available, falling back to CPU.
 *   `opencv-python-headless`
 *   `scikit-learn`
 *   `langdetect`
+*   `pyspellchecker`
 *   `pypdfium2`
 *   `accelerate`
 *   `einops`, `timm`, `scipy`
 
 ## Known Limitations
 
+*   **English/US-only:** Spell correction, phone normalization, and date parsing assume English language and US formats. International documents would require additional locale support.
 *   **Florence-2 bbox precision:** Florence-2 phrase grounding returns coarse bounding boxes. In mixed documents, a handwriting region may extend over adjacent typed text, causing those lines to be routed through TrOCR unnecessarily. The impact is minor (TrOCR may lowercase typed text), and the net effect is still positive for handwriting recall.
 *   **Dense form layouts:** Documents with complex grid structures (many small fields, checkboxes, and lines) produce fragmented OCR elements. The two currently failing test documents (33% and 30% flex WER) are both dense Hazleton Laboratories project sheet forms.
 *   **Classification edge cases:** Some fully handwritten documents on clean white paper with uniform line spacing are misclassified as "typed" by the image-based 8-feature classifier. A post-OCR classification override corrects this: if >=50% of text elements were sourced from TrOCR, the page is reclassified as "handwritten," preserving legitimate sentence-ending periods that would otherwise be stripped.

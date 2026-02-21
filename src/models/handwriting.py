@@ -15,7 +15,7 @@ class HandwritingRecognizer:
         self.device = device
         logger.info("Loading TrOCR model on %s...", self.device)
         self.processor = TrOCRProcessor.from_pretrained('microsoft/trocr-large-handwritten')
-        self.model = VisionEncoderDecoderModel.from_pretrained('microsoft/trocr-large-handwritten').to(self.device)
+        self.model = VisionEncoderDecoderModel.from_pretrained('microsoft/trocr-large-handwritten').to(self.device).eval()
 
         # CRITICAL FIX: Disable the pooler to prevent randomly initialized weights from affecting inference
         if hasattr(self.model.encoder, 'pooler'):

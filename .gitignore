@@ -20,8 +20,9 @@ ocr_error_examples.md
 input/*
 !input/.gitkeep
 
-# Test files
-tests/
+# Test artifacts (keep test source files)
+tests/__pycache__/
+tests/.pytest_cache/
 
 # Environment
 .env

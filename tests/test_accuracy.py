@@ -9,36 +9,19 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
-# Allow imports from the project root (parent of tests/)
+# Ensure project root and tests/ are on sys.path for both standalone and pytest usage
 _project_root = str(Path(__file__).resolve().parent.parent)
+_tests_dir = str(Path(__file__).resolve().parent)
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
+if _tests_dir not in sys.path:
+    sys.path.insert(0, _tests_dir)
 
-from flexible_evaluation import FlexibleEvaluator
+from flexible_evaluation import FlexibleEvaluator, levenshtein_distance
 from src.postprocessing.normalization import normalize_underscores
 
 # Feature flag for flexible evaluation
 FLEXIBLE_EVALUATION_ENABLED = True
-
-
-def levenshtein_distance(s1, s2):
-    """Calculate the Levenshtein distance between two sequences."""
-    if len(s1) < len(s2):
-        return levenshtein_distance(s2, s1)
-    if len(s2) == 0:
-        return len(s1)
-    
-    previous_row = range(len(s2) + 1)
-    for i, c1 in enumerate(s1):
-        current_row = [i + 1]
-        for j, c2 in enumerate(s2):
-            insertions = previous_row[j + 1] + 1
-            deletions = current_row[j] + 1
-            substitutions = previous_row[j] + (c1 != c2)
-            current_row.append(min(insertions, deletions, substitutions))
-        previous_row = current_row
-    
-    return previous_row[-1]
 
 
 def calculate_wer(reference, hypothesis):
@@ -282,19 +265,32 @@ def compare_to_baseline(current_results, baseline_file='test_baseline.json'):
     print(f"Pass rate: {baseline['passed']}/{baseline['total']} → {current_results['passed']}/{current_results['total']}")
 
 
+def test_ocr_accuracy():
+    """Pytest-discoverable regression test for OCR accuracy.
+
+    Runs the full 32-document evaluation and asserts all documents pass
+    their per-type WER/CER thresholds.
+    """
+    all_passed, data = run_tests(verbose=True)
+    total = data.get('total', 0)
+    passed = data.get('passed', 0)
+    assert total > 0, "No output files found — 0 documents tested"
+    assert all_passed, f"Accuracy regression: {passed}/{total} tests passed"
+
+
 if __name__ == "__main__":
     print("=" * 60)
     print("OCR PIPELINE REGRESSION TEST")
     print("=" * 60)
     print()
-    
+
     all_passed, results = run_tests(verbose=True)
-    
+
     if '--save-baseline' in sys.argv:
         save_baseline(results)
-    
+
     if '--compare' in sys.argv:
         compare_to_baseline(results)
-    
+
     # Exit with appropriate code for CI/CD
     sys.exit(0 if all_passed else 1)

@@ -15,11 +15,11 @@ class TableRecognizer:
 
         # Detection Model
         self.det_processor = AutoImageProcessor.from_pretrained("microsoft/table-transformer-detection")
-        self.det_model = TableTransformerForObjectDetection.from_pretrained("microsoft/table-transformer-detection").to(self.device)
+        self.det_model = TableTransformerForObjectDetection.from_pretrained("microsoft/table-transformer-detection").to(self.device).eval()
 
         # Structure Model
         self.struct_processor = AutoImageProcessor.from_pretrained("microsoft/table-transformer-structure-recognition")
-        self.struct_model = TableTransformerForObjectDetection.from_pretrained("microsoft/table-transformer-structure-recognition").to(self.device)
+        self.struct_model = TableTransformerForObjectDetection.from_pretrained("microsoft/table-transformer-structure-recognition").to(self.device).eval()
 
     def detect_tables(self, image: Image.Image, threshold: float = 0.7) -> List[Dict]:
         """

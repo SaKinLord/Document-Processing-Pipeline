@@ -47,7 +47,7 @@ class DocumentProcessor:
             self.florence_model_id,
             trust_remote_code=True,
             attn_implementation="eager"
-        ).to(self.device)
+        ).to(self.device).eval()
         self.florence_processor = AutoProcessor.from_pretrained(
             self.florence_model_id,
             trust_remote_code=True
@@ -77,14 +77,15 @@ class DocumentProcessor:
         imgs = [image] if isinstance(image, Image.Image) else image
         inputs = self.florence_processor(text=[prompt], images=imgs, return_tensors="pt").to(self.device)
 
-        generated_ids = self.florence_model.generate(
-            input_ids=inputs["input_ids"],
-            pixel_values=inputs["pixel_values"],
-            max_new_tokens=1024,
-            do_sample=False,
-            num_beams=3,
-            use_cache=False,
-        )
+        with torch.no_grad():
+            generated_ids = self.florence_model.generate(
+                input_ids=inputs["input_ids"],
+                pixel_values=inputs["pixel_values"],
+                max_new_tokens=1024,
+                do_sample=False,
+                num_beams=3,
+                use_cache=False,
+            )
         generated_text = self.florence_processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
         parsed_answer = self.florence_processor.post_process_generation(
             generated_text,
