@@ -33,8 +33,8 @@ Evaluated on a 32-document test set spanning typed forms, handwritten letters, f
 | Metric | Value |
 |--------|-------|
 | Regression Tests | **30/32 passing (93.75%)** |
-| Average Flex WER | **11.4%** |
-| Average Flex CER | **7.9%** |
+| Average Flex WER | **10.0%** |
+| Average Flex CER | **7.4%** |
 | Avg Processing Time | **~38s per document** (Google Colab T4 GPU) |
 | Total Pipeline Time | **~20 min for 32 documents** |
 
@@ -45,8 +45,8 @@ Flexible evaluation ignores punctuation and formatting differences (e.g., `12/10
 | Category | Docs | Pass Rate | Avg Flex WER | Avg Flex CER |
 |----------|:----:|:---------:|:------------:|:------------:|
 | Handwritten | 11 | **100%** (11/11) | 4.4% | 3.6% |
-| Typed | 17 | **88%** (15/17) | 14.5% | 13.5% |
-| Mixed | 4 | **100%** (4/4) | 19.7% | 15.3% |
+| Typed | 18 | **89%** (16/18) | 12.6% | 12.9% |
+| Mixed | 3 | **100%** (3/3) | 14.7% | 11.4% |
 
 **Per-type pass/fail thresholds:**
 
@@ -241,7 +241,7 @@ This approach is fully generalizable — it works on any English document withou
   ]
 }
 ```
-**Result:** 6.5% flex WER, 5.4% CER. Surya handles the printed form labels while TrOCR is routed in for the handwritten name fields.
+**Result:** 2.2% flex WER, 0.4% CER. Surya handles the printed form labels while TrOCR is routed in for the handwritten name fields.
 
 ### Table Detection (00922237)
 **Input:** Purchase requisition with structured tabular data

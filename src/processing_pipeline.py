@@ -24,9 +24,16 @@ from src.postprocessing import (
     add_phone_validation_to_element,
     add_date_validation_to_element,
 )
+from src.postprocessing.normalization import _transfer_surya_case
 
 logger = logging.getLogger(__name__)
 
+# Labels from Florence-2 object detection that represent visual elements
+# worth captioning. Other labels (e.g. "text", "person") are ignored.
+VISUAL_ELEMENT_LABELS = frozenset({
+    'image', 'figure', 'chart', 'plot', 'diagram',
+    'map', 'table', 'picture', 'human face',
+})
 
 class DocumentProcessor:
     def __init__(self, device: str = 'cuda' if torch.cuda.is_available() else 'cpu'):
@@ -42,6 +49,8 @@ class DocumentProcessor:
         self.TROCR_BBOX_PADDING = CONFIG.trocr_bbox_padding
 
         # Load Florence-2 for VLM tasks (Layout, Captioning)
+        # trust_remote_code=True is required — Florence-2 uses a custom
+        # architecture not yet merged into the transformers library.
         self.florence_model_id = "microsoft/Florence-2-large-ft"
         self.florence_model = AutoModelForCausalLM.from_pretrained(
             self.florence_model_id,
@@ -84,6 +93,8 @@ class DocumentProcessor:
                 max_new_tokens=1024,
                 do_sample=False,
                 num_beams=3,
+                # Florence-2's custom architecture has KV-cache incompatibilities
+                # with some transformers versions; False avoids silent corruption.
                 use_cache=False,
             )
         generated_text = self.florence_processor.batch_decode(generated_ids, skip_special_tokens=False)[0]
@@ -94,11 +105,11 @@ class DocumentProcessor:
         )
         return parsed_answer
 
-    def process_document(self, file_path: str) -> Tuple[Dict[str, Any], List[Image.Image]]:
+    def process_document(self, file_path: str, dpi: int = 200) -> Tuple[Dict[str, Any], List[Image.Image]]:
         """Process a document file (image or PDF) and return structured OCR results."""
         ext = os.path.splitext(file_path)[1].lower()
         if ext == '.pdf':
-            images = convert_pdf_to_images(file_path)
+            images = convert_pdf_to_images(file_path, dpi=dpi)
         else:
             img = load_image(file_path)
             images = [img] if img else []
@@ -351,12 +362,14 @@ class DocumentProcessor:
         if line_hw_region_type == 'signature':
             # Signature regions: require high TrOCR confidence
             if trocr_valid and hw_conf > surya_conf and hw_conf >= self.SIGNATURE_TROCR_GATE:
-                return normalize_punctuation_spacing(hw_text), "trocr"
+                result = normalize_punctuation_spacing(hw_text)
+                return _transfer_surya_case(line.text, result), "trocr"
             return line.text, "surya"
         else:
             # Handwriting regions or page-level ensemble: normal gate
             if trocr_valid and hw_conf > surya_conf:
-                return normalize_punctuation_spacing(hw_text), "trocr"
+                result = normalize_punctuation_spacing(hw_text)
+                return _transfer_surya_case(line.text, result), "trocr"
             return line.text, "surya"
 
     def _build_text_element(self, corrected_text: str, line, source_model: str,
@@ -429,9 +442,7 @@ class DocumentProcessor:
                     if is_bbox_too_large(bbox, width, height, label=label_clean):
                         continue
 
-                    if any(x in label_clean for x in ['image', 'figure', 'chart', 'plot',
-                                                        'diagram', 'map', 'table', 'picture',
-                                                        'human face']):
+                    if label_clean in VISUAL_ELEMENT_LABELS:
                         crop = crop_image(image, bbox)
                         description = self.run_florence(crop, "<MORE_DETAILED_CAPTION>")
                         caption = description.get('<MORE_DETAILED_CAPTION>', "")
