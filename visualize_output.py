@@ -4,6 +4,8 @@ import json
 import argparse
 from PIL import Image, ImageDraw, ImageFont
 
+from src.utils.image import denoise_image, deskew_image
+
 
 # Color scheme by element type
 TYPE_COLORS = {
@@ -125,7 +127,12 @@ def visualize_document(image_path, json_path, output_path,
                        show_layout=False, show_content=True, show_confidence=True):
     """Visualize a single document with detailed annotations."""
     try:
-        img = Image.open(image_path).convert("RGBA")
+        img = Image.open(image_path).convert("RGB")
+        # Apply the same preprocessing as the OCR pipeline so that
+        # bbox coordinates (computed on the preprocessed image) align.
+        img = denoise_image(img)
+        img = deskew_image(img)
+        img = img.convert("RGBA")
     except (OSError, IOError) as e:
         print(f"Error loading image {os.path.basename(image_path)}: {e}")
         return
