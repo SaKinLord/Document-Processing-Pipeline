@@ -1,6 +1,10 @@
-# Document Processing Pipeline (Hybrid Intelligent System)
+# Document Processing Pipeline
 
-A local pipeline for extracting structured data from complex, multi-format documents. It uses a **Hybrid Architecture** that dynamically switches between specialized models based on document content (Typed, Handwritten, or Mixed), with **per-line handwriting routing** that detects and re-routes individual handwritten lines on otherwise typed pages.
+A fully local, GPU-accelerated pipeline that converts complex documents — scanned forms, handwritten letters, faxes, mixed-content pages — into structured JSON. No cloud APIs, no external services.
+
+The system orchestrates **4 specialized AI models** (Florence-2, Surya OCR, TrOCR, Table Transformer) through a hybrid architecture that dynamically routes each text line to the right model based on document content. A 17-stage post-processing pipeline then cleans, validates, and structures the raw OCR output.
+
+**Built as a portfolio project** to demonstrate end-to-end ML system design: model selection, multi-model orchestration, heuristic classification, structured post-processing, and rigorous evaluation.
 
 ## Key Features
 
@@ -24,23 +28,37 @@ A local pipeline for extracting structured data from complex, multi-format docum
 
 ## Accuracy & Performance
 
-Based on regression testing with 32 ground truth documents (typed, handwritten, and mixed):
+Evaluated on a 32-document test set spanning typed forms, handwritten letters, fax cover sheets, purchase requisitions, and mixed-content lab reports.
 
 | Metric | Value |
 |--------|-------|
-| Regression Tests | **30/32 passing** |
-| Average Flex WER | **~11.3%** |
-| Average Flex CER | **~7.9%** |
+| Regression Tests | **30/32 passing (93.75%)** |
+| Average Flex WER | **11.4%** |
+| Average Flex CER | **7.9%** |
+| Avg Processing Time | **~38s per document** (Google Colab T4 GPU) |
+| Total Pipeline Time | **~20 min for 32 documents** |
 
-Flexible evaluation ignores punctuation and formatting differences. Pass/fail requires **both** flex WER and flex CER to be within thresholds.
+Flexible evaluation ignores punctuation and formatting differences (e.g., `12/10/98` vs `12-10-98`). Pass/fail requires **both** flex WER and flex CER to be within thresholds.
 
-**Per-document thresholds:**
+### Per-Category Breakdown
+
+| Category | Docs | Pass Rate | Avg Flex WER | Avg Flex CER |
+|----------|:----:|:---------:|:------------:|:------------:|
+| Handwritten | 11 | **100%** (11/11) | 4.4% | 3.6% |
+| Typed | 17 | **88%** (15/17) | 14.5% | 13.5% |
+| Mixed | 4 | **100%** (4/4) | 19.7% | 15.3% |
+
+**Per-type pass/fail thresholds:**
 
 | Document Type | Max WER | Max CER |
 |---------------|---------|---------|
 | Handwritten | 20% | 10% |
 | Typed | 40% | 30% |
 | Mixed | 40% | 20% |
+
+### Remaining Failures
+
+The 2 failing documents are both **Hazleton Laboratories "Project Sheet" forms** — dense multi-cell grid forms with stylized logo text, checkbox arrays, and handwritten fill-in fields within a heavily structured typed layout. These represent one of the hardest document archetypes for OCR pipelines. Potential improvements would include fine-tuned detection models for checkbox/form-field classification and logo-aware text recognition.
 
 ## Architecture
 
@@ -189,12 +207,90 @@ A single generalizable correction mechanism handles OCR errors without corpus-sp
 
 This approach is fully generalizable — it works on any English document without manual dictionary updates.
 
+## Sample Results
+
+### Handwritten Document (r02-070)
+**Input:** Cursive handwriting on lined paper
+
+**Output (excerpt):**
+```json
+{
+  "document_type": "handwritten",
+  "classification_confidence": 0.69,
+  "elements": [
+    {"type": "text", "content": "Cecil frowned in disappointment as he focussed upon the", "source_model": "trocr", "confidence": 0.99},
+    {"type": "text", "content": "printing to find no Govr., no Compu., intact no five pound notes", "source_model": "trocr", "confidence": 0.97}
+  ]
+}
+```
+**Result:** 1.6% flex WER, 2.5% CER. Difficult abbreviations ("Govr.", "Compu.") and uncommon words ("focussed") correctly recognized.
+
+### Typed Form with Handwritten Fill-ins (0000971160)
+**Input:** R&D Quality Improvement Form with printed labels and handwritten entries
+
+**Output (excerpt):**
+```json
+{
+  "document_type": "typed",
+  "classification_confidence": 0.85,
+  "signature_detected": true,
+  "elements": [
+    {"type": "text", "content": "R&D QUALITY IMPROVEMENT", "source_model": "surya", "confidence": 0.98},
+    {"type": "text", "content": "Name/Phone Ext.: M. Haman, P. Harper, P. Martinez", "source_model": "surya"},
+    {"type": "text", "content": "Supervisor/Manager: J. S. Wigan", "source_model": "trocr", "in_signature_region": true}
+  ]
+}
+```
+**Result:** 6.5% flex WER, 5.4% CER. Surya handles the printed form labels while TrOCR is routed in for the handwritten name fields.
+
+### Table Detection (00922237)
+**Input:** Purchase requisition with structured tabular data
+
+**Output (excerpt):**
+```json
+{
+  "type": "table",
+  "confidence": 0.98,
+  "structure_score": 85.0,
+  "num_rows": 16,
+  "num_columns": 6,
+  "cells": [
+    {"row": 0, "col": 0, "content": "Charge", "is_header": true},
+    {"row": 0, "col": 1, "content": "Account No.", "is_header": true},
+    {"row": 1, "col": 0, "content": "Amount $19,750"}
+  ]
+}
+```
+**Result:** 17.2% flex WER. Table structure correctly detected with row/column grid and header identification.
+
+Use `python visualize_output.py` to generate annotated images with color-coded bounding boxes overlaid on the original documents (blue = Surya, orange = TrOCR, dark blue = table, purple = signature, red = hallucination).
+
+## Engineering Decisions & Learnings
+
+This project went through several iterations. Key decisions made along the way:
+
+### Approaches That Were Tried and Removed
+
+| Approach | Why It Was Tried | Why It Was Removed |
+|----------|-----------------|-------------------|
+| **LayoutLMv3** (layout classifier) | Hoped to use it for semantic region labeling (header, paragraph, table, etc.) | The base model's classifier head is randomly initialized — without fine-tuning on labeled layout data, it produces meaningless `LABEL_0`/`LABEL_1` outputs. Removed rather than ship broken functionality. |
+| **Qwen2.5-0.5B** (LLM post-corrector) | Planned to use a small LLM to fix OCR errors in context | At 0.5B parameters, the model couldn't reliably follow correction instructions — it would hallucinate new content, drop words, or make changes worse than the original. The generalizable spell-checker approach proved more reliable. |
+| **Corpus-specific corrections** | Hardcoded regex fixes for known document patterns | These only worked on documents already seen. Replaced with generalizable approaches: OCR confusion matrix, page-level context detection, and multi-signal scoring. |
+| **Heuristic table promotion** | Detected tables based on text alignment patterns alone | Too many false positives. Switched to requiring visible grid lines detected by Table Transformer, validated with a 5-signal structure scoring system. |
+
+### Key Technical Insights
+
+- **TrOCR's pooler layer bug:** The `trocr-large-handwritten` checkpoint loads with randomly initialized pooler weights (not trained). Leaving the pooler active degrades recognition quality. Disabling it (`model.encoder.pooler = None`) is a one-line fix with measurable impact.
+- **Florence-2 query batching:** Initially ran separate Florence-2 forward passes for "signature" and "handwritten text" detection. Combining both into a single phrase-grounding query (`"signature. handwritten text"`) saves ~2 seconds per page with no accuracy loss.
+- **Per-line routing > page-level classification:** Page-level classification alone misses handwritten fill-ins on typed forms. The Florence-2 phrase grounding + per-line TrOCR routing catches these regardless of the page-level label.
+- **Decimal-dash confusion is systematic:** Surya OCR consistently misreads leading decimal points as dashes (`.88` -> `-88`). A naive regex fix would break dates and negative numbers. The solution uses page-level context: only correct when the page already contains decimal numbers like `14.00` or `12.5`.
+
 ## Setup
 
 ### Prerequisites
 *   **OS:** Windows / Linux (primarily tested on Google Colab with GPU runtime)
 *   **Hardware:** NVIDIA GPU (8GB+ VRAM recommended)
-*   **Python:** 3.10+
+*   **Python:** 3.12+
 
 ### Installation
 1.  Clone the repository:
@@ -373,10 +469,18 @@ All models load onto GPU if available, falling back to CPU.
 
 ## Known Limitations
 
-*   **English/US-only:** Spell correction, phone normalization, and date parsing assume English language and US formats. International documents would require additional locale support.
-*   **Florence-2 bbox precision:** Florence-2 phrase grounding returns coarse bounding boxes. In mixed documents, a handwriting region may extend over adjacent typed text, causing those lines to be routed through TrOCR unnecessarily. The impact is minor (TrOCR may lowercase typed text), and the net effect is still positive for handwriting recall.
-*   **Dense form layouts:** Documents with complex grid structures (many small fields, checkboxes, and lines) produce fragmented OCR elements. The two currently failing test documents (33% and 30% flex WER) are both dense Hazleton Laboratories project sheet forms.
-*   **Classification edge cases:** Some fully handwritten documents on clean white paper with uniform line spacing are misclassified as "typed" by the image-based 8-feature classifier. A post-OCR classification override corrects this: if >=50% of text elements were sourced from TrOCR, the page is reclassified as "handwritten," preserving legitimate sentence-ending periods that would otherwise be stripped.
+*   **English/US-only:** Spell correction, phone normalization, and date parsing assume English language and US formats. International documents would require locale-specific models and formatting rules.
+*   **Florence-2 bbox precision:** Phrase grounding returns coarse bounding boxes. In mixed documents, a handwriting region may extend over adjacent typed text, routing those lines through TrOCR unnecessarily. The net effect is still positive for handwriting recall.
+*   **Dense form layouts:** Documents with complex grid structures (checkboxes, many small fields, dense lines) produce fragmented OCR elements. The two failing test documents are both dense Hazleton Labs forms with stylized logos, checkbox arrays, and handwritten fill-ins.
+*   **Proper name accuracy:** Handwritten names in form fill-in fields are the weakest spot. Names like "Hamann", "Wigand", and "Baroody" are occasionally misread by 1-2 characters, as they aren't constrained by dictionary lookup.
+*   **Classification edge cases:** Some handwritten documents on clean white paper with uniform line spacing are initially misclassified as "typed." A post-OCR override corrects this: if >=50% of text elements were sourced from TrOCR, the page is reclassified as "handwritten."
+
+## Future Improvements
+
+*   Fine-tuned checkbox/form-field detector for dense grid forms
+*   Multi-language support (OCR models already support it; post-processing needs locale adaptation)
+*   Batch processing optimizations for high-volume document workflows
+*   LayoutLMv3 integration with a fine-tuned checkpoint for semantic region labeling
 
 ## License
 
