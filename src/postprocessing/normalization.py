@@ -438,3 +438,24 @@ def remove_consecutive_duplicate_words(elements: List[Dict]) -> List[Dict]:
             element["duplicate_words_removed"] = len(words) - len(deduplicated)
 
     return elements
+
+
+# ============================================================================
+# TrOCR case preservation
+# ============================================================================
+SURYA_UPPERCASE_RATIO = 0.70  # When ≥70% of Surya's alpha chars are uppercase
+
+
+def _transfer_surya_case(surya_text: str, trocr_text: str) -> str:
+    """Preserve ALL-CAPS casing from Surya when TrOCR wins the ensemble.
+
+    TrOCR tends to lowercase typed ALL-CAPS text (e.g. "DATE ISSUED" → "date issued").
+    If Surya's original text was predominantly uppercase, apply upper() to TrOCR's result.
+    """
+    alpha_chars = [c for c in surya_text if c.isalpha()]
+    if not alpha_chars:
+        return trocr_text
+    upper_ratio = sum(1 for c in alpha_chars if c.isupper()) / len(alpha_chars)
+    if upper_ratio >= SURYA_UPPERCASE_RATIO:
+        return trocr_text.upper()
+    return trocr_text

@@ -14,6 +14,8 @@ def main():
     parser = argparse.ArgumentParser(description="Document Processing Pipeline")
     parser.add_argument("--input_dir", type=str, default="input", help="Directory containing documents to process")
     parser.add_argument("--output_dir", type=str, default="output", help="Directory to save JSON output files")
+    parser.add_argument("--dpi", type=int, default=200,
+                        help="DPI for PDF-to-image rendering (default: 200)")
     parser.add_argument("--log-level", choices=["DEBUG", "INFO", "WARNING"], default="INFO",
                         help="Set logging verbosity (default: INFO)")
     args = parser.parse_args()
@@ -45,7 +47,7 @@ def main():
         logger.error("Failed to initialize models. Ensure you have a GPU and dependencies installed.\nError: %s", e)
         return
 
-    VALID_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp', '.gif', '.webp', '.pdf'}
+    VALID_EXTENSIONS = {'.png', '.jpg', '.jpeg', '.tif', '.tiff', '.bmp', '.gif', '.webp', '.heic', '.avif', '.pdf'}
     all_files = [f for f in os.listdir(args.input_dir) if os.path.isfile(os.path.join(args.input_dir, f))]
     files = [f for f in all_files if os.path.splitext(f)[1].lower() in VALID_EXTENSIONS]
     skipped = len(all_files) - len(files)
@@ -62,13 +64,17 @@ def main():
         output_file_path = os.path.join(args.output_dir, output_filename)
 
         try:
-            doc_data, page_images = processor.process_document(file_path)
+            doc_data, page_images = processor.process_document(file_path, dpi=args.dpi)
             doc_data = postprocess_output(doc_data, page_images=page_images)
             with open(output_file_path, "w", encoding="utf-8") as f:
                 json.dump(doc_data, f, indent=2, ensure_ascii=False)
         except Exception as e:
             logger.error("Error processing %s: %s", filename, e, exc_info=True)
-            error_data = {"filename": filename, "error": str(e)}
+            error_data = {
+                "filename": filename,
+                "pages": [],
+                "processing_error": str(e),
+            }
             with open(output_file_path, "w", encoding="utf-8") as f:
                 json.dump(error_data, f, indent=2, ensure_ascii=False)
         logger.info("  Finished [%d/%d] %s (%.1fs)", idx + 1, len(files), filename, time.time() - file_start)

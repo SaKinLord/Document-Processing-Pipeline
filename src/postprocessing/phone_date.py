@@ -118,22 +118,87 @@ def add_date_validation_to_element(element: dict) -> dict:
 
 
 # ============================================================================
-# Phone Number Validation
+# Phone Number Detection (single pattern set used by both validation and
+# normalization to avoid silent disagreements between parallel systems)
 # ============================================================================
 
+# Ordered by specificity — more explicit formats first so they match before
+# the loose 10-consecutive-digit fallback.
 PHONE_PATTERNS = [
-    r'\((\d{3})\)\s*(\d{3})[- ]?(\d{4})',
-    r'(\d{3})-(\d{3})-(\d{4})',
-    r'(\d{3})/(\d{3})-(\d{4})',
-    r'(\d{3})\s+(\d{3})[- ]?(\d{4})',
-    r'(?<!\d)(\d{3})(\d{3})(\d{4})(?!\d)',
+    r'\((\d{3})\)\s*(\d{3})[- ]?(\d{4})',          # (XXX) XXX-XXXX
+    r'(\d{3})-(\d{3})-(\d{4})',                      # XXX-XXX-XXXX
+    r'(\d{3})/(\d{3})-(\d{4})',                      # XXX/XXX-XXXX
+    r'(\d{3})\s+(\d{3})\s+(\d{4})',                  # XXX XXX XXXX (space-separated)
+    r'(\d{3})[\s\-/.](\d{3})[\s\-.]?(\d{4})',        # XXX.XXX.XXXX and mixed separators
+    r'(?<!\d)(\d{3})(\d{3})(\d{4})(?!\d)',            # XXXXXXXXXX (10 consecutive digits)
 ]
 
 FALSE_POSITIVE_PATTERNS = [
-    r'\d{5}-\d{4}',      # ZIP+4 codes
-    r'\d{1,2}/\d{1,2}/\d{2,4}',  # Dates
-    r'\d{4}/\d{2}/\d{2}',        # ISO dates
+    r'\d{5}-\d{4}',              # ZIP+4 codes
+    r'\d{1,2}/\d{1,2}/\d{2,4}', # Dates
+    r'\d{4}/\d{2}/\d{2}',       # ISO dates
 ]
+
+
+def _collect_false_positive_spans(text: str):
+    """Return list of (start, end) spans that are dates or ZIP codes."""
+    spans = []
+    for fp_pattern in FALSE_POSITIVE_PATTERNS:
+        for fp_match in re.finditer(fp_pattern, text):
+            spans.append((fp_match.start(), fp_match.end()))
+    return spans
+
+
+def _find_phone_matches(text: str):
+    """Find all phone matches in *text* using the shared PHONE_PATTERNS.
+
+    Returns a list of dicts with ``raw``, ``area_code``, ``prefix``,
+    ``line``, and ``normalized`` keys.  Duplicates (same normalized
+    number) are suppressed.
+    """
+    if not text:
+        return []
+
+    fp_spans = _collect_false_positive_spans(text)
+
+    # Also skip if the entire element is a date or ZIP
+    text_stripped = text.strip()
+    if re.match(r'^\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}$', text_stripped):
+        return []
+
+    seen_normalized = set()
+    matches = []
+
+    for pattern in PHONE_PATTERNS:
+        for match in re.finditer(pattern, text):
+            # Skip matches overlapping a false-positive span
+            m_start, m_end = match.start(), match.end()
+            if any(m_start < fp_end and m_end > fp_start
+                   for fp_start, fp_end in fp_spans):
+                continue
+
+            groups = match.groups()
+            if len(groups) < 3:
+                continue
+
+            area_code, prefix, line = groups[0], groups[1], groups[2]
+            if not (area_code and prefix and line):
+                continue
+
+            normalized = f"({area_code}) {prefix}-{line}"
+            if normalized in seen_normalized:
+                continue
+            seen_normalized.add(normalized)
+
+            matches.append({
+                'raw': match.group(0),
+                'area_code': area_code,
+                'prefix': prefix,
+                'line': line,
+                'normalized': normalized,
+            })
+
+    return matches
 
 
 def validate_phone_number(text: str) -> dict:
@@ -150,58 +215,43 @@ def validate_phone_number(text: str) -> dict:
     if not text:
         return result
 
-    # Collect false-positive spans (dates, ZIP+4) for per-match overlap checks
-    fp_spans = []
-    for fp_pattern in FALSE_POSITIVE_PATTERNS:
-        for fp_match in re.finditer(fp_pattern, text):
-            fp_spans.append((fp_match.start(), fp_match.end()))
+    for m in _find_phone_matches(text):
+        area_code = m['area_code']
+        prefix = m['prefix']
+        line = m['line']
 
-    for pattern in PHONE_PATTERNS:
-        matches = re.finditer(pattern, text)
-        for match in matches:
-            # Skip phone matches that overlap any false-positive span
-            m_start, m_end = match.start(), match.end()
-            if any(m_start < fp_end and m_end > fp_start
-                   for fp_start, fp_end in fp_spans):
-                continue
-            groups = match.groups()
-            if len(groups) >= 3:
-                area_code = groups[0]
-                prefix = groups[1]
-                line = groups[2]
+        issues = []
 
-                issues = []
+        if len(area_code) != 3:
+            issues.append(f'area_code_length:{len(area_code)}')
+        if len(prefix) != 3:
+            issues.append(f'prefix_length:{len(prefix)}')
+        if len(line) != 4:
+            issues.append(f'line_length:{len(line)}')
 
-                if len(area_code) != 3:
-                    issues.append(f'area_code_length:{len(area_code)}')
-                if len(prefix) != 3:
-                    issues.append(f'prefix_length:{len(prefix)}')
-                if len(line) != 4:
-                    issues.append(f'line_length:{len(line)}')
+        total_digits = len(area_code) + len(prefix) + len(line)
+        if total_digits < 10:
+            issues.append(f'missing_digits:{10 - total_digits}')
+        elif total_digits > 10:
+            issues.append(f'extra_digits:{total_digits - 10}')
 
-                total_digits = len(area_code) + len(prefix) + len(line)
-                if total_digits < 10:
-                    issues.append(f'missing_digits:{10-total_digits}')
-                elif total_digits > 10:
-                    issues.append(f'extra_digits:{total_digits-10}')
+        full_number = area_code + prefix + line
+        if re.match(r'^(\d)\1{5,}$', full_number):
+            issues.append('repeated_digits')
 
-                full_number = area_code + prefix + line
-                if re.match(r'^(\d)\1{5,}$', full_number):
-                    issues.append('repeated_digits')
+        phone_data = {
+            'raw': m['raw'],
+            'normalized': m['normalized'],
+            'area_code': area_code,
+            'prefix': prefix,
+            'line': line,
+            'total_digits': total_digits,
+        }
 
-                phone_data = {
-                    'raw': match.group(0),
-                    'normalized': f'({area_code}) {prefix}-{line}',
-                    'area_code': area_code,
-                    'prefix': prefix,
-                    'line': line,
-                    'total_digits': total_digits
-                }
+        if issues:
+            phone_data['issues'] = issues
 
-                if issues:
-                    phone_data['issues'] = issues
-
-                result['phones'].append(phone_data)
+        result['phones'].append(phone_data)
 
     if not result['phones']:
         result['validation_status'] = 'none'
@@ -237,11 +287,13 @@ def add_phone_validation_to_element(element: dict) -> dict:
     if not content:
         return element
 
-    phone_keywords = ['phone', 'fax', 'tel', 'call', '(', '-']
-    has_keyword = any(kw.lower() in content.lower() for kw in phone_keywords)
+    phone_keywords = ['phone', 'fax', 'tel', 'call']
+    has_keyword = any(kw in content.lower() for kw in phone_keywords)
+    # Also trigger on parenthesized area codes like "(555)" but not bare parens
+    has_paren_digits = bool(re.search(r'\(\d{3}\)', content))
     has_digits = bool(re.search(r'\d{3}', content))
 
-    if not (has_keyword and has_digits):
+    if not ((has_keyword or has_paren_digits) and has_digits):
         return element
 
     validation = validate_phone_number(content)
@@ -259,29 +311,10 @@ def add_phone_validation_to_element(element: dict) -> dict:
 # Phone Number Normalization
 # ============================================================================
 
-PHONE_PATTERN = re.compile(
-    r'''
-    (?:^|(?<=\s)|(?<=[:\-/]))  # Start of string, whitespace, or separator
-    (?:
-        \((\d{3})\)\s*         # (XXX) with optional space
-        |
-        (\d{3})[\s\-/.]        # XXX followed by separator
-    )
-    (\d{3})                    # Exchange: XXX
-    [\s\-.]?                   # Optional separator
-    (\d{4})                    # Subscriber: XXXX
-    (?=\s|$|[,;])              # End boundary
-    ''',
-    re.VERBOSE
-)
-
 PHONE_TYPE_PATTERNS = {
     'fax': re.compile(r'\b(FAX|FACSIMILE|TELECOPY)\b', re.IGNORECASE),
     'phone': re.compile(r'\b(PHONE|TELEPHONE|TEL|CALL)\b', re.IGNORECASE),
 }
-
-ZIP_PATTERN = re.compile(r'\b\d{5}(-\d{4})?\b')
-DATE_PATTERN = re.compile(r'\b\d{1,2}[/\-]\d{1,2}[/\-]\d{2,4}\b')
 
 
 def normalize_phone_numbers(elements: List[Dict]) -> List[Dict]:
@@ -319,35 +352,12 @@ def normalize_phone_numbers(elements: List[Dict]) -> List[Dict]:
 def extract_phone_numbers(content: str) -> List[str]:
     """
     Extract and normalize all phone numbers from content.
+
+    Uses the shared ``_find_phone_matches`` helper (same patterns as
+    ``validate_phone_number``) so both functions always agree on what
+    constitutes a phone number.
     """
-    phones = []
-
-    for match in PHONE_PATTERN.finditer(content):
-        area_code = match.group(1) or match.group(2)
-        exchange = match.group(3)
-        subscriber = match.group(4)
-
-        if area_code and exchange and subscriber:
-            if len(area_code) == 3 and len(exchange) == 3 and len(subscriber) == 4:
-                normalized = f"({area_code}) {exchange}-{subscriber}"
-                phones.append(normalized)
-
-    # Slash-separated format
-    slash_pattern = re.compile(r'(\d{3})/(\d{3})-(\d{4})')
-    for match in slash_pattern.finditer(content):
-        normalized = f"({match.group(1)}) {match.group(2)}-{match.group(3)}"
-        if normalized not in phones:
-            phones.append(normalized)
-
-    # Space-separated format
-    space_pattern = re.compile(r'\b(\d{3})\s+(\d{3})\s+(\d{4})\b')
-    for match in space_pattern.finditer(content):
-        if not re.search(r'\d{1,2}[/\-]', content[max(0, match.start()-5):match.start()]):
-            normalized = f"({match.group(1)}) {match.group(2)}-{match.group(3)}"
-            if normalized not in phones:
-                phones.append(normalized)
-
-    return phones
+    return [m['normalized'] for m in _find_phone_matches(content)]
 
 
 def is_date_or_zip(content: str) -> bool:

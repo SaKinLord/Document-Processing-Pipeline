@@ -185,10 +185,22 @@ def split_line_bbox_to_words(line_bbox, words, min_word_width=10):
     return word_bboxes
 
 
+# Maximum page-area ratio allowed per visual element type.
+# Detections covering more than this fraction of the page are likely
+# full-page false positives from Florence-2 object detection.
+BBOX_AREA_THRESHOLDS = {
+    "human face": 0.10,
+    "signature": 0.25,
+    "logo": 0.30,
+    "graphic": 0.50,
+    "default": 0.50,
+}
+
+
 def is_bbox_too_large(bbox, width, height, label=None):
     """
     Checks if a bounding box covers too much of the page area.
-    Uses per-type thresholds.
+    Uses per-type thresholds from BBOX_AREA_THRESHOLDS.
     """
     x1, y1, x2, y2 = bbox
     area = (x2 - x1) * (y2 - y1)
@@ -199,14 +211,6 @@ def is_bbox_too_large(bbox, width, height, label=None):
 
     ratio = area / total_area
 
-    AREA_THRESHOLDS = {
-        "human face": 0.10,
-        "signature": 0.25,
-        "logo": 0.30,
-        "graphic": 0.50,
-        "default": 0.50
-    }
-
-    threshold = AREA_THRESHOLDS.get(label.lower(), AREA_THRESHOLDS["default"]) if label else AREA_THRESHOLDS["default"]
+    threshold = BBOX_AREA_THRESHOLDS.get(label.lower(), BBOX_AREA_THRESHOLDS["default"]) if label else BBOX_AREA_THRESHOLDS["default"]
 
     return ratio > threshold

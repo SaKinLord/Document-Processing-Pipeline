@@ -45,6 +45,7 @@ from src.postprocessing.hallucination import (
     calculate_hallucination_score,
     process_hallucinations,
     filter_rotated_margin_text,
+    _detect_numeric_columns,
 )
 from src.postprocessing.table_validation import (
     cluster_positions,
@@ -56,11 +57,13 @@ from src.postprocessing.phone_date import (
     validate_date_format,
     is_date_or_zip,
     extract_phone_numbers,
+    add_phone_validation_to_element,
 )
 from src.postprocessing.pipeline import (
     sanitize_elements,
     deduplicate_layout_regions,
 )
+from src.postprocessing.normalization import _transfer_surya_case
 
 
 # ============================================================================
@@ -352,6 +355,29 @@ class TestCheckCharacterPatterns:
         score, patterns = check_character_patterns("caf\u00e9")
         assert "unusual_chars" not in patterns
 
+    def test_latex_infty_detected(self):
+        score, patterns = check_character_patterns("\\infty")
+        assert "latex_command" in patterns
+        assert score > 0
+
+    def test_latex_sigma_detected(self):
+        score, patterns = check_character_patterns("\\sigma")
+        assert "latex_command" in patterns
+
+    def test_latex_newline_not_detected(self):
+        """Single-char command \\n should NOT trigger (requires 2+ alpha chars)."""
+        score, patterns = check_character_patterns("\\n")
+        assert "latex_command" not in patterns
+
+    def test_latex_digits_not_detected(self):
+        """Backslash followed by digits should NOT trigger."""
+        score, patterns = check_character_patterns("\\123")
+        assert "latex_command" not in patterns
+
+    def test_normal_word_not_latex(self):
+        score, patterns = check_character_patterns("infinity")
+        assert "latex_command" not in patterns
+
 
 class TestIsValidText:
     def test_normal_word(self):
@@ -478,6 +504,38 @@ class TestFilterRotatedMarginText:
     def test_keeps_normal_text(self):
         elements = [
             {"type": "text", "content": "Department", "bbox": [100, 100, 400, 120]},
+        ]
+        result = filter_rotated_margin_text(elements, page_dimensions=(1000, 1000))
+        assert len(result) == 1
+
+    def test_single_digit_removed(self):
+        """Single digit at rotated margin should be removed (Bates fragment)."""
+        elements = [
+            {"type": "text", "content": "2", "bbox": [960, 100, 980, 120]},
+        ]
+        result = filter_rotated_margin_text(elements, page_dimensions=(1000, 1000))
+        assert len(result) == 0
+
+    def test_two_digit_removed(self):
+        """Two-digit number at rotated margin should be removed."""
+        elements = [
+            {"type": "text", "content": "39", "bbox": [960, 100, 980, 120]},
+        ]
+        result = filter_rotated_margin_text(elements, page_dimensions=(1000, 1000))
+        assert len(result) == 0
+
+    def test_three_digit_kept(self):
+        """Three-digit number at rotated margin should be kept (could be page number)."""
+        elements = [
+            {"type": "text", "content": "123", "bbox": [960, 100, 980, 120]},
+        ]
+        result = filter_rotated_margin_text(elements, page_dimensions=(1000, 1000))
+        assert len(result) == 1
+
+    def test_bates_number_kept(self):
+        """Long Bates number (8+ digits) at rotated margin should be kept."""
+        elements = [
+            {"type": "text", "content": "12345678", "bbox": [960, 100, 980, 120]},
         ]
         result = filter_rotated_margin_text(elements, page_dimensions=(1000, 1000))
         assert len(result) == 1
@@ -690,6 +748,43 @@ class TestDeduplicateLayoutRegions:
         ]
         result = deduplicate_layout_regions(elements)
         assert len(result) == 2  # Text dupes not removed by this function
+
+
+# ============================================================================
+# TrOCR Case Preservation
+# ============================================================================
+
+
+class TestTransferSuryaCase:
+    def test_all_caps_surya_uppercases_trocr(self):
+        """When Surya text is ALL-CAPS, TrOCR output should be uppercased."""
+        assert _transfer_surya_case("DATE ISSUED", "date issued") == "DATE ISSUED"
+
+    def test_mixed_case_no_change(self):
+        """Mixed case Surya text should not alter TrOCR output."""
+        assert _transfer_surya_case("John Smith", "john smith") == "john smith"
+
+    def test_lowercase_no_change(self):
+        """Lowercase Surya text should not alter TrOCR output."""
+        assert _transfer_surya_case("department", "deparment") == "deparment"
+
+    def test_no_alpha_no_change(self):
+        """Non-alpha Surya text should not alter TrOCR output."""
+        assert _transfer_surya_case("123-456", "123-456") == "123-456"
+
+    def test_boundary_below_70_percent(self):
+        """69% uppercase should NOT trigger uppercasing."""
+        # 9 alpha chars, 6 upper = 66.7% → below 70%
+        assert _transfer_surya_case("ABCDEFghi", "abcdefghi") == "abcdefghi"
+
+    def test_boundary_above_70_percent(self):
+        """70%+ uppercase should trigger uppercasing."""
+        # 10 alpha chars, 7 upper = 70% → at threshold
+        assert _transfer_surya_case("ABCDEFGhij", "abcdefghij") == "ABCDEFGHIJ"
+
+    def test_empty_surya_text(self):
+        """Empty Surya text should not alter TrOCR output."""
+        assert _transfer_surya_case("", "some text") == "some text"
 
 
 # ============================================================================
@@ -1095,3 +1190,316 @@ class TestFilterSignatureOverlapGarbage:
         result = filter_signature_overlap_garbage(elements)
         text_els = [e for e in result if e.get("type") == "text"]
         assert len(text_els) == 1
+
+
+# ============================================================================
+# Resolution-Adaptive Row Clustering
+# ============================================================================
+
+from src.utils.text import cluster_text_rows
+
+
+class TestClusterTextRows:
+    def test_empty_input(self):
+        assert cluster_text_rows([]) == []
+
+    def test_single_element(self):
+        elements = [{"bbox": [0, 100, 200, 120]}]
+        result = cluster_text_rows(elements)
+        assert len(result) == 1
+        assert result[0]["row_id"] == 0
+
+    def test_same_row_elements(self):
+        """Elements at similar y-coords should cluster into one row."""
+        elements = [
+            {"bbox": [200, 100, 300, 120]},
+            {"bbox": [0, 102, 100, 122]},
+        ]
+        result = cluster_text_rows(elements)
+        assert all(e["row_id"] == 0 for e in result)
+        # Sorted left-to-right within row
+        assert result[0]["bbox"][0] < result[1]["bbox"][0]
+
+    def test_different_rows(self):
+        """Elements far apart vertically should be in separate rows."""
+        elements = [
+            {"bbox": [0, 100, 100, 120]},
+            {"bbox": [0, 500, 100, 520]},
+        ]
+        result = cluster_text_rows(elements)
+        assert result[0]["row_id"] != result[1]["row_id"]
+
+    def test_adaptive_threshold_scales_with_page(self):
+        """Threshold should scale: a 15px gap on a 3000px page is tiny."""
+        # On a tall page (3000px), 15px apart should be the same row
+        # because adaptive threshold = max(8, 3000 * 0.012) = 36px
+        elements = [
+            {"bbox": [0, 100, 100, 120]},
+            {"bbox": [0, 115, 100, 135]},
+            {"bbox": [0, 2900, 100, 2920]},  # drives max_y to ~2920
+        ]
+        result = cluster_text_rows(elements)
+        # First two should be in the same row, third separate
+        assert result[0]["row_id"] == result[1]["row_id"]
+        assert result[2]["row_id"] != result[0]["row_id"]
+
+    def test_explicit_threshold_overrides_adaptive(self):
+        """An explicit y_threshold should override adaptive calculation."""
+        elements = [
+            {"bbox": [0, 100, 100, 120]},
+            {"bbox": [0, 200, 100, 220]},
+        ]
+        # With a very large threshold, everything clusters together
+        result = cluster_text_rows(elements, y_threshold=200)
+        assert result[0]["row_id"] == result[1]["row_id"]
+
+
+# ============================================================================
+# Hallucination Table-Region Exemption
+# ============================================================================
+
+
+class TestHallucinationTableExemption:
+    def test_garbage_inside_table_kept(self):
+        """Short numbers inside a table region should NOT be removed."""
+        elements = [
+            {"type": "table", "bbox": [0, 0, 500, 500]},
+            {"type": "text", "content": "8", "confidence": 0.50,
+             "bbox": [50, 50, 70, 70]},
+        ]
+        result = process_hallucinations(elements, page_dimensions=(1000, 1000))
+        text_els = [e for e in result if e.get("type") == "text"]
+        assert len(text_els) == 1, "Short number inside table should be kept"
+
+    def test_garbage_outside_table_still_removed(self):
+        """Short garbage text NOT inside a table should still be removed."""
+        elements = [
+            {"type": "table", "bbox": [0, 0, 200, 200]},
+            {"type": "text", "content": "///", "confidence": 0.20,
+             "bbox": [500, 500, 510, 510]},
+        ]
+        result = process_hallucinations(elements, page_dimensions=(1000, 1000))
+        text_els = [e for e in result if e.get("type") == "text"]
+        assert len(text_els) == 0, "Garbage outside table should still be removed"
+
+    def test_no_tables_normal_behavior(self):
+        """Without tables, hallucination scoring behaves normally."""
+        elements = [
+            {"type": "text", "content": "///", "confidence": 0.20,
+             "bbox": [5, 5, 15, 15]},
+        ]
+        result = process_hallucinations(elements, page_dimensions=(1000, 1000))
+        assert len(result) == 0
+
+
+# ============================================================================
+# Numeric Column Detection
+# ============================================================================
+
+
+class TestDetectNumericColumns:
+    """Unit tests for _detect_numeric_columns()."""
+
+    def test_column_aligned_numbers_detected(self):
+        """3+ numbers at the same x-position should form a column."""
+        elements = [
+            {"type": "text", "content": "42", "bbox": [100, 100, 130, 120]},
+            {"type": "text", "content": "88", "bbox": [100, 150, 130, 170]},
+            {"type": "text", "content": "7", "bbox": [100, 200, 130, 220]},
+        ]
+        result = _detect_numeric_columns(elements, 1000)
+        assert len(result) == 3
+
+    def test_fewer_than_three_not_detected(self):
+        """Only 2 aligned numbers should NOT form a column."""
+        elements = [
+            {"type": "text", "content": "42", "bbox": [100, 100, 130, 120]},
+            {"type": "text", "content": "88", "bbox": [100, 150, 130, 170]},
+        ]
+        result = _detect_numeric_columns(elements, 1000)
+        assert len(result) == 0
+
+    def test_non_aligned_not_detected(self):
+        """Numbers spread across different x-positions should NOT cluster."""
+        elements = [
+            {"type": "text", "content": "42", "bbox": [100, 100, 130, 120]},
+            {"type": "text", "content": "88", "bbox": [400, 150, 430, 170]},
+            {"type": "text", "content": "7", "bbox": [700, 200, 730, 220]},
+        ]
+        result = _detect_numeric_columns(elements, 1000)
+        assert len(result) == 0
+
+    def test_long_text_excluded(self):
+        """Text longer than NUMERIC_COL_MAX_CHARS should not be candidates."""
+        elements = [
+            {"type": "text", "content": "12345", "bbox": [100, 100, 130, 120]},
+            {"type": "text", "content": "67890", "bbox": [100, 150, 130, 170]},
+            {"type": "text", "content": "11111", "bbox": [100, 200, 130, 220]},
+        ]
+        result = _detect_numeric_columns(elements, 1000)
+        assert len(result) == 0
+
+    def test_non_text_ignored(self):
+        """Non-text elements should be ignored."""
+        elements = [
+            {"type": "table", "content": "42", "bbox": [100, 100, 130, 120]},
+            {"type": "text", "content": "88", "bbox": [100, 150, 130, 170]},
+            {"type": "text", "content": "7", "bbox": [100, 200, 130, 220]},
+        ]
+        result = _detect_numeric_columns(elements, 1000)
+        assert len(result) == 0  # Only 2 text candidates
+
+    def test_percentages_accepted(self):
+        """Values like '42%' should be valid numeric candidates."""
+        elements = [
+            {"type": "text", "content": "42%", "bbox": [100, 100, 130, 120]},
+            {"type": "text", "content": "88%", "bbox": [100, 150, 130, 170]},
+            {"type": "text", "content": "7%", "bbox": [100, 200, 130, 220]},
+        ]
+        result = _detect_numeric_columns(elements, 1000)
+        assert len(result) == 3
+
+    def test_decimals_accepted(self):
+        """Values like '3.5' should be valid numeric candidates."""
+        elements = [
+            {"type": "text", "content": "3.5", "bbox": [100, 100, 130, 120]},
+            {"type": "text", "content": "1.2", "bbox": [100, 150, 130, 170]},
+            {"type": "text", "content": "9.0", "bbox": [100, 200, 130, 220]},
+        ]
+        result = _detect_numeric_columns(elements, 1000)
+        assert len(result) == 3
+
+    def test_multiple_columns(self):
+        """Two separate columns at different x-positions should both be detected."""
+        elements = [
+            # Column 1 at x~100
+            {"type": "text", "content": "1", "bbox": [100, 100, 120, 120]},
+            {"type": "text", "content": "2", "bbox": [100, 150, 120, 170]},
+            {"type": "text", "content": "3", "bbox": [100, 200, 120, 220]},
+            # Column 2 at x~500
+            {"type": "text", "content": "4", "bbox": [500, 100, 520, 120]},
+            {"type": "text", "content": "5", "bbox": [500, 150, 520, 170]},
+            {"type": "text", "content": "6", "bbox": [500, 200, 520, 220]},
+        ]
+        result = _detect_numeric_columns(elements, 1000)
+        assert len(result) == 6
+
+    def test_no_bbox_skipped(self):
+        """Elements without bboxes should be skipped gracefully."""
+        elements = [
+            {"type": "text", "content": "42"},
+            {"type": "text", "content": "88", "bbox": [100, 150, 130, 170]},
+            {"type": "text", "content": "7", "bbox": [100, 200, 130, 220]},
+        ]
+        result = _detect_numeric_columns(elements, 1000)
+        assert len(result) == 0  # Only 2 candidates with bboxes
+
+
+class TestNumericColumnIntegration:
+    """Integration tests: numeric columns survive process_hallucinations()."""
+
+    def test_aligned_numbers_survive_hallucination_filter(self):
+        """Column-aligned short numbers should NOT be removed by hallucination filter."""
+        elements = [
+            {"type": "text", "content": "42", "confidence": 0.60,
+             "bbox": [100, 100, 130, 120]},
+            {"type": "text", "content": "88", "confidence": 0.60,
+             "bbox": [100, 200, 130, 220]},
+            {"type": "text", "content": "7", "confidence": 0.60,
+             "bbox": [100, 300, 130, 320]},
+        ]
+        result = process_hallucinations(elements, page_dimensions=(1000, 1000))
+        text_els = [e for e in result if e.get("type") == "text"]
+        assert len(text_els) == 3, "Column-aligned numbers should be exempted"
+
+    def test_isolated_number_still_scored(self):
+        """A single isolated short number should still be scored (flagged or removed)."""
+        elements = [
+            {"type": "text", "content": "42", "confidence": 0.40,
+             "bbox": [5, 5, 25, 25]},
+        ]
+        result = process_hallucinations(elements, page_dimensions=(1000, 1000))
+        text_els = [e for e in result if e.get("type") == "text"]
+        # Either removed entirely, or flagged as hallucination
+        if text_els:
+            assert text_els[0].get("hallucination_flag") is True, \
+                "Isolated short number should be flagged if not removed"
+        # Both outcomes (removed or flagged) are acceptable
+
+
+# ============================================================================
+# Phone Pattern Consolidation
+# ============================================================================
+
+
+class TestPhonePatternConsolidation:
+    def test_validation_and_extraction_agree(self):
+        """validate_phone_number and extract_phone_numbers should find the
+        same phones for the same input."""
+        test_cases = [
+            "(212) 555-1234",
+            "212-555-1234",
+            "212/555-1234",
+            "FAX: (310) 555-5678",
+            "Call 206 623 0594 today",
+        ]
+        for text in test_cases:
+            validated = validate_phone_number(text)
+            extracted = extract_phone_numbers(text)
+            validated_normalized = [p["normalized"] for p in validated["phones"]]
+            assert set(validated_normalized) == set(extracted), (
+                f"Mismatch for '{text}': validation={validated_normalized}, extraction={extracted}"
+            )
+
+
+# ============================================================================
+# Phone Validation Keyword Filtering
+# ============================================================================
+
+
+class TestPhoneValidationKeywords:
+    """Verify that add_phone_validation_to_element no longer over-triggers
+    on common characters like '(' and '-'."""
+
+    def test_no_trigger_on_bare_parens(self):
+        """Text with parentheses but no phone pattern should not trigger."""
+        element = {"type": "text", "content": "(see attached) 200-page report"}
+        result = add_phone_validation_to_element(element)
+        assert "phone_validation" not in result
+
+    def test_triggers_on_phone_keyword(self):
+        """Text with a phone keyword and valid number should still trigger."""
+        element = {"type": "text", "content": "Phone: 555-123-4567"}
+        result = add_phone_validation_to_element(element)
+        assert "phone_validation" in result
+
+    def test_triggers_on_parenthesized_area_code(self):
+        """Text with (XXX) area code format should still trigger."""
+        element = {"type": "text", "content": "(212) 555-1234"}
+        result = add_phone_validation_to_element(element)
+        assert "phone_validation" in result
+
+
+# ============================================================================
+# Bbox Area Thresholds (module-level constant)
+# ============================================================================
+
+
+class TestBboxAreaThresholds:
+    """Verify is_bbox_too_large uses the module-level BBOX_AREA_THRESHOLDS."""
+
+    def test_human_face_strict_threshold(self):
+        from src.utils.bbox import is_bbox_too_large
+        # 15% of page → above 10% threshold for human face
+        assert is_bbox_too_large([0, 0, 150, 100], 1000, 100, label="human face")
+
+    def test_logo_within_threshold(self):
+        from src.utils.bbox import is_bbox_too_large
+        # 20% of page → below 30% threshold for logo
+        assert not is_bbox_too_large([0, 0, 200, 100], 1000, 100, label="logo")
+
+    def test_default_threshold_applied(self):
+        from src.utils.bbox import is_bbox_too_large
+        # Unknown label uses default (50%)
+        assert not is_bbox_too_large([0, 0, 400, 100], 1000, 100, label="unknown_thing")
+        assert is_bbox_too_large([0, 0, 600, 100], 1000, 100, label="unknown_thing")

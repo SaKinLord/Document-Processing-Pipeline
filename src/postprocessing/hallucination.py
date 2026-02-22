@@ -9,7 +9,8 @@ import re
 import logging
 from typing import Dict, List, Optional, Tuple
 
-from src.utils.bbox import estimate_page_dimensions, DEFAULT_PAGE_WIDTH, DEFAULT_PAGE_HEIGHT
+from src.utils.bbox import estimate_page_dimensions, bboxes_intersect, DEFAULT_PAGE_WIDTH, DEFAULT_PAGE_HEIGHT
+from src.postprocessing.table_validation import cluster_positions
 from src.config import CONFIG
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,7 @@ SHORT_NUMBERS_SCORE = 0.35
 PUNCTUATION_ONLY_SCORE = 0.6           # All punctuation characters
 UNUSUAL_CHARS_SCORE = 0.3              # Non-ASCII outside Latin Extended
 ISOLATED_YEAR_SCORE = 0.25             # Lone year (e.g. "1998")
+BACKSLASH_COMMAND_SCORE = 0.50         # LaTeX-style command (e.g. \infty, \sigma)
 
 # ============================================================================
 # Signal 4: Bbox anomaly (15% max weight)
@@ -75,10 +77,66 @@ MARGIN_SHORT_FRAGMENT_WEIGHT = 0.25    # Short non-numeric margin fragment
 MARGIN_LONG_WEIGHT = 0.10             # Longer text at margin
 
 # ============================================================================
+# Numeric column detection (undetected-table exemption)
+# ============================================================================
+NUMERIC_COL_MAX_CHARS = 4              # Max chars to consider as numeric cell
+NUMERIC_COL_X_TOLERANCE_RATIO = 0.03   # 3% of page width for x-position clustering
+NUMERIC_COL_MIN_CLUSTER_SIZE = 3       # Min elements to form a column
+
+# ============================================================================
 # Rotated margin text filter
 # ============================================================================
 ROTATED_RIGHT_EDGE_THRESHOLD = 0.92    # Text starting past 92% of page width
 ROTATED_NARROW_THRESHOLD = 0.04        # Max 4% of page width for narrow bbox
+ROTATED_DIGIT_MIN_LENGTH = 3           # Min digit length to exempt from rotated margin removal
+
+
+def _detect_numeric_columns(elements: List[Dict], page_width: float) -> set:
+    """Detect column-aligned short numeric text clusters.
+
+    When Table Transformer misses a table (no grid lines), short numeric
+    content gets false-positive hallucination flags.  This function finds
+    vertically-aligned clusters of short numeric elements and returns their
+    ids so they can be exempted from scoring.
+
+    Returns:
+        Set of id(element) for elements in numeric columns (3+ members).
+    """
+    # Collect candidates: text elements with short numeric content
+    candidates = []
+    for element in elements:
+        if element.get('type') != 'text':
+            continue
+        content = element.get('content', '').strip()
+        if len(content) > NUMERIC_COL_MAX_CHARS:
+            continue
+        if re.match(r'^[\d.,]+%?$', content):
+            bbox = element.get('bbox', [])
+            if len(bbox) >= 4:
+                x_center = (bbox[0] + bbox[2]) / 2
+                candidates.append((x_center, element))
+
+    if not candidates:
+        return set()
+
+    # Cluster by x-position
+    tolerance = page_width * NUMERIC_COL_X_TOLERANCE_RATIO
+    x_positions = [c[0] for c in candidates]
+    clusters = cluster_positions(x_positions, tolerance)
+
+    # Build a mapping from x-position to cluster index
+    # cluster_positions returns sorted clusters, so match candidates to clusters
+    column_ids = set()
+    for cluster in clusters:
+        if len(cluster) < NUMERIC_COL_MIN_CLUSTER_SIZE:
+            continue
+        cluster_min = min(cluster) - tolerance
+        cluster_max = max(cluster) + tolerance
+        for x_center, element in candidates:
+            if cluster_min <= x_center <= cluster_max:
+                column_ids.add(id(element))
+
+    return column_ids
 
 
 def process_hallucinations(elements: List[Dict],
@@ -87,14 +145,18 @@ def process_hallucinations(elements: List[Dict],
     Score each text element for hallucination likelihood using multiple signals.
     Removes high-confidence hallucinations, flags uncertain ones.
 
-    Signals:
-    - Confidence score (15%)
-    - Text length (10%)
-    - Character patterns (25%)
-    - Bbox size anomaly (15%)
-    - Dictionary check (15%)
-    - Repetition patterns (10%)
-    - Margin position (10-25%)
+    Signals (max weight per signal):
+    1. Confidence score   — up to 15%
+    2. Text length        — up to 10%
+    3. Character patterns — up to 25%
+    4. Bbox size anomaly  — up to 15%
+    5. Valid text check    — up to 15%
+    6. Repetition patterns — up to 10%
+    7. Margin position    — up to 25%
+
+    The per-signal weights intentionally sum above 100% so that content
+    triggering several independent signals reaches the removal threshold.
+    The final score is clamped to [0.0, 1.0].
 
     Args:
         elements: List of element dictionaries
@@ -104,6 +166,18 @@ def process_hallucinations(elements: List[Dict],
         Processed elements with hallucinations handled
     """
     page_width, page_height = estimate_page_dimensions(elements, page_dimensions)
+
+    # Collect table bboxes so we can exempt text inside tables from scoring.
+    # Short numbers, tiny bboxes, and isolated digits are normal table-cell
+    # content — penalising them causes false-positive hallucination flags on
+    # statistical / tabular documents.
+    table_bboxes = [
+        e['bbox'] for e in elements
+        if e.get('type') == 'table' and e.get('bbox') and len(e.get('bbox', [])) == 4
+    ]
+
+    # Detect column-aligned numeric clusters (tables without grid lines)
+    numeric_column_ids = _detect_numeric_columns(elements, page_width)
 
     processed = []
     removed_count = 0
@@ -117,6 +191,17 @@ def process_hallucinations(elements: List[Dict],
         content = element.get("content", "")
         confidence = element.get("confidence", 1.0)
         bbox = element.get("bbox", [])
+
+        # Skip hallucination scoring for text elements inside a detected table
+        if table_bboxes and bbox and len(bbox) == 4:
+            if any(bboxes_intersect(bbox, tb) for tb in table_bboxes):
+                processed.append(element)
+                continue
+
+        # Skip scoring for numeric elements in detected column clusters
+        if id(element) in numeric_column_ids:
+            processed.append(element)
+            continue
 
         # Calculate hallucination score
         score, signals = calculate_hallucination_score(
@@ -189,8 +274,8 @@ def filter_rotated_margin_text(elements: List[Dict],
         very_narrow = bbox_width < page_width * ROTATED_NARROW_THRESHOLD
 
         if at_right_edge and very_narrow:
-            # Exempt digit-only content (Bates numbers, document IDs)
-            if content.isdigit():
+            # Exempt digit-only content long enough to be Bates numbers / document IDs
+            if content.isdigit() and len(content) >= ROTATED_DIGIT_MIN_LENGTH:
                 filtered.append(element)
                 continue
             continue  # Drop rotated margin fragment
@@ -328,6 +413,11 @@ def check_character_patterns(content: str) -> Tuple[float, List[str]]:
     if re.match(r'^(19|20)\d{2}s?$', stripped):
         score += ISOLATED_YEAR_SCORE
         patterns.append("isolated_year")
+
+    # LaTeX-style commands from rotated text (e.g. \infty, \sigma)
+    if re.match(r'^\\[a-zA-Z]{2,}$', stripped):
+        score += BACKSLASH_COMMAND_SCORE
+        patterns.append("latex_command")
 
     return min(score, 1.0), patterns
 
