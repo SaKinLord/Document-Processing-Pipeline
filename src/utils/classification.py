@@ -7,6 +7,7 @@ and fax/letterhead header detection.
 """
 
 import logging
+from dataclasses import dataclass
 
 import cv2
 import numpy as np
@@ -15,122 +16,160 @@ from src.config import CONFIG
 
 logger = logging.getLogger(__name__)
 
+
 # ============================================================================
-# Configuration Constants
+# Configuration Dataclasses
 # ============================================================================
 
-# Image preprocessing
-MAX_ANALYSIS_WIDTH = 1000       # Resize images wider than this for analysis
+@dataclass(frozen=True)
+class FeatureConfig:
+    """Scoring thresholds and weights for a classification feature.
 
-# Page region ratios (signature ratio imported from centralized config)
-SIGNATURE_REGION_RATIO = CONFIG.signature_region_ratio
-HEADER_REGION_RATIO = 0.15      # Top 15% of page = fax/letterhead region
+    Used by ``_score_feature`` (higher value = more typed) and
+    ``_score_feature_inverted`` (lower value = more typed).
 
-# Minimum region dimensions (pixels) for analysis
-MIN_SIGNATURE_HEIGHT = 20
-MIN_SIGNATURE_WIDTH = 50
-MIN_HEADER_HEIGHT = 30
-MIN_HEADER_WIDTH = 100
+    ``high_thresh``/``high_weight`` correspond to the strongest signal tier,
+    ``med_thresh``/``med_weight`` to the moderate tier, and the optional
+    ``low_thresh``/``low_weight`` to a weak third tier.
+    """
+    high_thresh: float
+    med_thresh: float
+    high_weight: float
+    med_weight: float
+    low_thresh: float = 0.0
+    low_weight: float = 0.0
 
-# Signature detection
-MIN_INK_RATIO = 0.003           # Too little ink = no signature
-MAX_INK_RATIO = 0.15            # Too much ink = printed text, not signature
-MIN_SIG_COMPONENT_AREA = 50     # Minimum connected component area
-MAX_SIG_COMPONENT_RATIO = 0.3   # Maximum component area as ratio of region
-MIN_SIG_COMPONENT_WIDTH = 20    # Minimum component width
-MIN_SIG_COMPONENTS = 1
-MAX_SIG_COMPONENTS = 15
 
-# Fax header detection
-MIN_FAX_HEADER_KERNEL_W = 25
-FAX_HEADER_KERNEL_DIVISOR = 20
-FAX_LINE_COVERAGE_RATIO = 0.1   # Horizontal lines must span 10% of width
-FAX_INK_RANGE = (0.02, 0.25)    # Valid ink density range for fax headers
+@dataclass(frozen=True)
+class AngleConfig:
+    """Angle variance scoring: positional typed signal + handwriting penalties."""
+    low_thresh: float = 400
+    med_thresh: float = 800
+    high_thresh: float = 1500
+    med_high_thresh: float = 1200
+    form_gate: float = 0.3
+    low_weight: float = 0.10
+    med_weight: float = 0.05
+    high_penalty: float = -0.15
+    med_high_penalty: float = -0.08
 
-# Stroke variance thresholds
-MIN_STROKE_SAMPLES = 100        # Minimum stroke width samples needed
-MIN_MEAN_STROKE_WIDTH = 0.1     # Below this, variance is meaningless
-STROKE_CV_NORMALIZER = 0.5      # Coefficient of variation normalization factor
 
-# Stroke score → typed_score contribution
-STROKE_LOW_THRESH = 0.3         # Below = strong typed signal
-STROKE_MED_THRESH = 0.5         # Below = moderate typed signal
-STROKE_LOW_WEIGHT = 0.20
-STROKE_MED_WEIGHT = 0.10
+@dataclass(frozen=True)
+class EdgeConfig:
+    """Edge density scoring: typed range and sparse fallback."""
+    typed_range: tuple = (0.02, 0.15)
+    sparse_thresh: float = 0.02
+    typed_weight: float = 0.08
+    sparse_weight: float = 0.04
 
-# Line regularity thresholds
-MIN_HOUGH_LINES = 5             # Minimum lines for regularity analysis
-HOUGH_THRESHOLD = 50
-HORIZONTAL_ANGLE_TOLERANCE = 5  # Degrees from horizontal to count as "regular"
 
-# Line score → typed_score contribution
-LINE_HIGH_THRESH = 0.7          # Above = strong typed signal
-LINE_MED_THRESH = 0.5           # Above = moderate typed signal
-LINE_HIGH_WEIGHT = 0.12
-LINE_MED_WEIGHT = 0.06
+@dataclass(frozen=True)
+class SignatureDetectionConfig:
+    """Parameters for signature region detection via connected components."""
+    min_height: int = 20
+    min_width: int = 50
+    min_ink_ratio: float = 0.003
+    max_ink_ratio: float = 0.15
+    min_component_area: int = 50
+    max_component_ratio: float = 0.3
+    min_component_width: int = 20
+    min_components: int = 1
+    max_components: int = 15
 
-# Angle variance thresholds (from contour fitting)
-ANGLE_LOW_THRESH = 400          # Below = typed
-ANGLE_MED_THRESH = 800          # Below = moderate typed
-ANGLE_HIGH_THRESH = 1500        # Above (with low form) = handwritten
-ANGLE_MED_HIGH_THRESH = 1200    # Above (with low form) = moderate handwritten
-ANGLE_FORM_GATE = 0.3           # Form score must be below this for handwriting penalty
-ANGLE_LOW_WEIGHT = 0.10
-ANGLE_MED_WEIGHT = 0.05
-ANGLE_HIGH_PENALTY = -0.15
-ANGLE_MED_HIGH_PENALTY = -0.08
 
-# Edge density thresholds
-EDGE_TYPED_RANGE = (0.02, 0.15) # Edge density range indicating typed text
-EDGE_SPARSE_THRESH = 0.02       # Below = sparse (still slightly typed)
-EDGE_TYPED_WEIGHT = 0.08
-EDGE_SPARSE_WEIGHT = 0.04
+@dataclass(frozen=True)
+class FaxHeaderConfig:
+    """Parameters for fax/letterhead header detection via morphology."""
+    min_height: int = 30
+    min_width: int = 100
+    min_kernel_w: int = 25
+    kernel_divisor: int = 20
+    line_coverage_ratio: float = 0.1
+    ink_range: tuple = (0.02, 0.25)
 
-# Form structure thresholds
-FORM_HIGH_THRESH = 0.5          # Strong form structure
-FORM_MED_THRESH = 0.2           # Moderate form structure
-FORM_LOW_THRESH = 0.1           # Weak form structure
-FORM_HIGH_WEIGHT = 0.30
-FORM_MED_WEIGHT = 0.20
-FORM_LOW_WEIGHT = 0.12
-FORM_LINE_RATIO_NORMALIZER = 0.01  # Normalize line pixel ratio to 0-1 score
-MIN_FORM_KERNEL_SIZE = 20
-FORM_KERNEL_DIVISOR = 25
 
-# Character uniformity thresholds
-MIN_UNIFORM_COMPONENTS = 10     # Minimum components for meaningful analysis
-UNIFORMITY_HIGH_THRESH = 0.7
-UNIFORMITY_MED_THRESH = 0.4
-UNIFORMITY_HIGH_WEIGHT = 0.12
-UNIFORMITY_MED_WEIGHT = 0.06
-UNIFORMITY_CV_NORMALIZER = 0.4  # CV normalization factor
+@dataclass(frozen=True)
+class RuledPaperConfig:
+    """Ruled paper handwriting detection overrides."""
+    line_thresh: float = 0.95
+    form_thresh: float = 0.25
+    angle_range: tuple = (300, 700)
+    penalty: float = -0.12
 
-# Fax header boost
-FAX_HEADER_WEIGHT = 0.20
 
-# Signature on form boost
-SIG_ON_FORM_THRESH = 0.2        # Minimum form score for signature boost
-SIG_ON_FORM_WEIGHT = 0.10
+@dataclass(frozen=True)
+class SparseFormConfig:
+    """Sparse/blank form detection — forces typed classification floor."""
+    edge_thresh: float = 0.02
+    form_thresh: float = 0.15
+    floor: float = 0.65
 
-# Ruled paper handwriting detection
-RULED_PAPER_LINE_THRESH = 0.95
-RULED_PAPER_FORM_THRESH = 0.25
-RULED_PAPER_ANGLE_RANGE = (300, 700)
-RULED_PAPER_PENALTY = -0.12
 
-# Sparse/blank form detection
-SPARSE_FORM_EDGE_THRESH = 0.02
-SPARSE_FORM_FORM_THRESH = 0.15
-SPARSE_FORM_FLOOR = 0.65       # Force typed_score to this minimum
+@dataclass(frozen=True)
+class ClassificationConfig:
+    """Top-level classification configuration grouping all sub-configs."""
+    # Feature scoring configs
+    stroke: FeatureConfig = FeatureConfig(
+        high_thresh=0.3, med_thresh=0.5, high_weight=0.20, med_weight=0.10,
+    )
+    line_regularity: FeatureConfig = FeatureConfig(
+        high_thresh=0.7, med_thresh=0.5, high_weight=0.12, med_weight=0.06,
+    )
+    angle: AngleConfig = AngleConfig()
+    edge: EdgeConfig = EdgeConfig()
+    form: FeatureConfig = FeatureConfig(
+        high_thresh=0.5, med_thresh=0.2, high_weight=0.30, med_weight=0.20,
+        low_thresh=0.1, low_weight=0.12,
+    )
+    uniformity: FeatureConfig = FeatureConfig(
+        high_thresh=0.7, med_thresh=0.4, high_weight=0.12, med_weight=0.06,
+    )
 
-# Final classification boundaries
-TYPED_THRESHOLD = 0.65          # typed_score >= this → "typed"
-HANDWRITTEN_THRESHOLD = 0.45    # typed_score <= this → "handwritten"
-MAX_CLASSIFICATION_CONFIDENCE = 0.95
+    # Detection configs
+    signature: SignatureDetectionConfig = SignatureDetectionConfig()
+    fax_header: FaxHeaderConfig = FaxHeaderConfig()
+    ruled_paper: RuledPaperConfig = RuledPaperConfig()
+    sparse_form: SparseFormConfig = SparseFormConfig()
 
-# Feature default (returned on analysis failure)
-DEFAULT_SCORE = 0.5
-DEFAULT_ANGLE_VARIANCE = 1000
+    # Combo scoring weights
+    fax_header_weight: float = 0.20
+    sig_on_form_thresh: float = 0.2
+    sig_on_form_weight: float = 0.10
+
+    # Classification boundaries
+    typed_threshold: float = 0.65
+    handwritten_threshold: float = 0.45
+    max_confidence: float = 0.95
+
+    # Image preprocessing
+    max_analysis_width: int = 1000
+    header_region_ratio: float = 0.15
+
+    # Feature defaults (returned on analysis failure)
+    default_score: float = 0.5
+    default_angle_variance: float = 1000.0
+
+    # Stroke analysis parameters
+    stroke_min_samples: int = 100
+    stroke_min_mean_width: float = 0.1
+    stroke_cv_normalizer: float = 0.5
+
+    # Line regularity analysis parameters
+    line_min_hough_lines: int = 5
+    line_hough_threshold: int = 50
+    line_horizontal_angle_tolerance: int = 5
+
+    # Form structure analysis parameters
+    form_line_ratio_normalizer: float = 0.01
+    form_min_kernel_size: int = 20
+    form_kernel_divisor: int = 25
+
+    # Character uniformity analysis parameters
+    uniformity_min_components: int = 10
+    uniformity_cv_normalizer: float = 0.4
+
+
+CFG = ClassificationConfig()
 
 
 # ============================================================================
@@ -150,10 +189,10 @@ def classify_document_type(image):
         h, w = gray.shape
 
         # Region isolation
-        sig_start = int(h * SIGNATURE_REGION_RATIO)
+        sig_start = int(h * CONFIG.signature_region_ratio)
         main_body = gray[:sig_start, :]
         signature_region = gray[sig_start:, :]
-        header_region = gray[:int(h * HEADER_REGION_RATIO), :]
+        header_region = gray[:int(h * CFG.header_region_ratio), :]
 
         has_signature = _detect_signature_in_region(signature_region)
         has_fax_header = _detect_fax_header(header_region)
@@ -188,19 +227,50 @@ def detect_signature_region(image):
 
         h, w = gray.shape[:2] if len(gray.shape) >= 2 else (gray.shape[0], 1)
 
-        sig_start = int(h * SIGNATURE_REGION_RATIO)
+        sig_ratio = CONFIG.signature_region_ratio
+        sig_start = int(h * sig_ratio)
         signature_region = gray[sig_start:, :]
 
         if _detect_signature_in_region(signature_region):
             return {
                 'has_signature': True,
-                'region_bbox': [0.0, SIGNATURE_REGION_RATIO, 1.0, 1.0]
+                'region_bbox': [0.0, sig_ratio, 1.0, 1.0]
             }
         return {'has_signature': False, 'region_bbox': None}
 
     except (cv2.error, ValueError, IndexError) as e:
         logger.warning("detect_signature_region failed: %s", e)
         return {'has_signature': False, 'region_bbox': None}
+
+
+# ============================================================================
+# Scoring Helpers
+# ============================================================================
+
+def _score_feature(value, cfg):
+    """Score a feature where higher value = more typed.
+
+    Returns the weight for the highest tier the value exceeds.
+    """
+    if value > cfg.high_thresh:
+        return cfg.high_weight
+    if value > cfg.med_thresh:
+        return cfg.med_weight
+    if cfg.low_thresh and value > cfg.low_thresh:
+        return cfg.low_weight
+    return 0.0
+
+
+def _score_feature_inverted(value, cfg):
+    """Score a feature where lower value = more typed.
+
+    Returns the weight for the highest tier the value falls below.
+    """
+    if value < cfg.high_thresh:
+        return cfg.high_weight
+    if value < cfg.med_thresh:
+        return cfg.med_weight
+    return 0.0
 
 
 # ============================================================================
@@ -216,8 +286,8 @@ def _prepare_grayscale(image):
         gray = img_np
 
     h, w = gray.shape
-    if w > MAX_ANALYSIS_WIDTH:
-        scale = MAX_ANALYSIS_WIDTH / w
+    if w > CFG.max_analysis_width:
+        scale = CFG.max_analysis_width / w
         gray = cv2.resize(gray, (0, 0), fx=scale, fy=scale)
 
     return gray
@@ -240,73 +310,65 @@ def _compute_typed_score(scores, has_signature, has_fax_header):
     typed_score = 0.0
 
     # Stroke variance: low = typed
-    if scores['stroke'] < STROKE_LOW_THRESH:
-        typed_score += STROKE_LOW_WEIGHT
-    elif scores['stroke'] < STROKE_MED_THRESH:
-        typed_score += STROKE_MED_WEIGHT
+    typed_score += _score_feature_inverted(scores['stroke'], CFG.stroke)
 
     # Line regularity: high = typed
-    if scores['line'] > LINE_HIGH_THRESH:
-        typed_score += LINE_HIGH_WEIGHT
-    elif scores['line'] > LINE_MED_THRESH:
-        typed_score += LINE_MED_WEIGHT
+    typed_score += _score_feature(scores['line'], CFG.line_regularity)
 
-    # Angle variance
-    if scores['angle'] < ANGLE_LOW_THRESH:
-        typed_score += ANGLE_LOW_WEIGHT
-    elif scores['angle'] < ANGLE_MED_THRESH:
-        typed_score += ANGLE_MED_WEIGHT
-    elif scores['angle'] > ANGLE_HIGH_THRESH and scores['form'] < ANGLE_FORM_GATE:
-        typed_score += ANGLE_HIGH_PENALTY
-    elif scores['angle'] > ANGLE_MED_HIGH_THRESH and scores['form'] < ANGLE_FORM_GATE:
-        typed_score += ANGLE_MED_HIGH_PENALTY
+    # Angle variance (custom — penalties + cross-feature gate)
+    angle = scores['angle']
+    acfg = CFG.angle
+    if angle < acfg.low_thresh:
+        typed_score += acfg.low_weight
+    elif angle < acfg.med_thresh:
+        typed_score += acfg.med_weight
+    elif angle > acfg.high_thresh and scores['form'] < acfg.form_gate:
+        typed_score += acfg.high_penalty
+    elif angle > acfg.med_high_thresh and scores['form'] < acfg.form_gate:
+        typed_score += acfg.med_high_penalty
 
-    # Edge density: moderate = typed
-    if EDGE_TYPED_RANGE[0] < scores['edge'] < EDGE_TYPED_RANGE[1]:
-        typed_score += EDGE_TYPED_WEIGHT
-    elif scores['edge'] < EDGE_SPARSE_THRESH:
-        typed_score += EDGE_SPARSE_WEIGHT
+    # Edge density (custom — range check)
+    edge = scores['edge']
+    ecfg = CFG.edge
+    if ecfg.typed_range[0] < edge < ecfg.typed_range[1]:
+        typed_score += ecfg.typed_weight
+    elif edge < ecfg.sparse_thresh:
+        typed_score += ecfg.sparse_weight
 
-    # Form structure (strongest signal)
-    if scores['form'] > FORM_HIGH_THRESH:
-        typed_score += FORM_HIGH_WEIGHT
-    elif scores['form'] > FORM_MED_THRESH:
-        typed_score += FORM_MED_WEIGHT
-    elif scores['form'] > FORM_LOW_THRESH:
-        typed_score += FORM_LOW_WEIGHT
+    # Form structure: high = typed (3 tiers)
+    typed_score += _score_feature(scores['form'], CFG.form)
 
-    # Character uniformity
-    if scores['uniformity'] > UNIFORMITY_HIGH_THRESH:
-        typed_score += UNIFORMITY_HIGH_WEIGHT
-    elif scores['uniformity'] > UNIFORMITY_MED_THRESH:
-        typed_score += UNIFORMITY_MED_WEIGHT
+    # Character uniformity: high = typed
+    typed_score += _score_feature(scores['uniformity'], CFG.uniformity)
 
     # Fax/letterhead header boost
     if has_fax_header:
-        typed_score += FAX_HEADER_WEIGHT
+        typed_score += CFG.fax_header_weight
 
     # Signature on a form
-    if has_signature and scores['form'] > SIG_ON_FORM_THRESH:
-        typed_score += SIG_ON_FORM_WEIGHT
+    if has_signature and scores['form'] > CFG.sig_on_form_thresh:
+        typed_score += CFG.sig_on_form_weight
 
     # Ruled paper handwriting penalty
+    rp = CFG.ruled_paper
     is_ruled = (
-        scores['line'] >= RULED_PAPER_LINE_THRESH
-        and scores['form'] < RULED_PAPER_FORM_THRESH
-        and RULED_PAPER_ANGLE_RANGE[0] < scores['angle'] < RULED_PAPER_ANGLE_RANGE[1]
+        scores['line'] >= rp.line_thresh
+        and scores['form'] < rp.form_thresh
+        and rp.angle_range[0] < scores['angle'] < rp.angle_range[1]
     )
     if is_ruled:
-        typed_score += RULED_PAPER_PENALTY
-        logger.debug("Ruled paper handwriting detected: %.2f adjustment", RULED_PAPER_PENALTY)
+        typed_score += rp.penalty
+        logger.debug("Ruled paper handwriting detected: %.2f adjustment", rp.penalty)
 
     # Sparse/blank form floor
+    sp = CFG.sparse_form
     is_sparse = (
-        scores['edge'] < SPARSE_FORM_EDGE_THRESH
-        and scores['form'] > SPARSE_FORM_FORM_THRESH
+        scores['edge'] < sp.edge_thresh
+        and scores['form'] > sp.form_thresh
         and not is_ruled
     )
-    if is_sparse and typed_score < SPARSE_FORM_FLOOR:
-        typed_score = SPARSE_FORM_FLOOR
+    if is_sparse and typed_score < sp.floor:
+        typed_score = sp.floor
         logger.debug("Sparse/blank form detected: forcing typed classification")
 
     return max(0.0, min(typed_score, 1.0))
@@ -314,10 +376,10 @@ def _compute_typed_score(scores, has_signature, has_fax_header):
 
 def _classify_from_score(typed_score):
     """Map typed_score to a (doc_type, confidence) tuple."""
-    if typed_score >= TYPED_THRESHOLD:
-        return ("typed", min(typed_score, MAX_CLASSIFICATION_CONFIDENCE))
-    elif typed_score <= HANDWRITTEN_THRESHOLD:
-        return ("handwritten", min(1.0 - typed_score, MAX_CLASSIFICATION_CONFIDENCE))
+    if typed_score >= CFG.typed_threshold:
+        return ("typed", min(typed_score, CFG.max_confidence))
+    elif typed_score <= CFG.handwritten_threshold:
+        return ("handwritten", min(1.0 - typed_score, CFG.max_confidence))
     else:
         return ("mixed", 0.5)
 
@@ -336,7 +398,7 @@ def _log_classification(scores, has_signature, has_fax_header, typed_score):
     logger.debug("  has_fax_header: %s", has_fax_header)
     logger.debug("Final typed_score: %.3f", typed_score)
     logger.debug("  Thresholds: typed>=%.2f, handwritten<=%.2f, else mixed",
-                 TYPED_THRESHOLD, HANDWRITTEN_THRESHOLD)
+                 CFG.typed_threshold, CFG.handwritten_threshold)
 
 
 # ============================================================================
@@ -346,7 +408,8 @@ def _log_classification(scores, has_signature, has_fax_header, typed_score):
 def _detect_signature_in_region(region):
     """Detect if a region contains a handwritten signature via connected components."""
     try:
-        if region.shape[0] < MIN_SIGNATURE_HEIGHT or region.shape[1] < MIN_SIGNATURE_WIDTH:
+        sig = CFG.signature
+        if region.shape[0] < sig.min_height or region.shape[1] < sig.min_width:
             return False
 
         _, binary = cv2.threshold(region, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
@@ -354,7 +417,7 @@ def _detect_signature_in_region(region):
         total_pixels = region.shape[0] * region.shape[1]
         ink_ratio = np.count_nonzero(binary) / total_pixels if total_pixels > 0 else 0
 
-        if ink_ratio < MIN_INK_RATIO or ink_ratio > MAX_INK_RATIO:
+        if ink_ratio < sig.min_ink_ratio or ink_ratio > sig.max_ink_ratio:
             return False
 
         num_labels, _, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
@@ -365,10 +428,10 @@ def _detect_signature_in_region(region):
         for i in range(1, num_labels):
             area = stats[i, cv2.CC_STAT_AREA]
             width = stats[i, cv2.CC_STAT_WIDTH]
-            if MIN_SIG_COMPONENT_AREA < area < total_pixels * MAX_SIG_COMPONENT_RATIO and width > MIN_SIG_COMPONENT_WIDTH:
+            if sig.min_component_area < area < total_pixels * sig.max_component_ratio and width > sig.min_component_width:
                 sig_components += 1
 
-        return MIN_SIG_COMPONENTS <= sig_components <= MAX_SIG_COMPONENTS
+        return sig.min_components <= sig_components <= sig.max_components
 
     except cv2.error as e:
         logger.debug("_detect_signature_in_region failed: %s", e)
@@ -378,20 +441,21 @@ def _detect_signature_in_region(region):
 def _detect_fax_header(header_region):
     """Detect fax/letterhead header patterns via horizontal line morphology."""
     try:
-        if header_region.shape[0] < MIN_HEADER_HEIGHT or header_region.shape[1] < MIN_HEADER_WIDTH:
+        fax = CFG.fax_header
+        if header_region.shape[0] < fax.min_height or header_region.shape[1] < fax.min_width:
             return False
 
         _, binary = cv2.threshold(header_region, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-        kernel_w = max(MIN_FAX_HEADER_KERNEL_W, header_region.shape[1] // FAX_HEADER_KERNEL_DIVISOR)
+        kernel_w = max(fax.min_kernel_w, header_region.shape[1] // fax.kernel_divisor)
         horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_w, 1))
         horizontal_lines = cv2.morphologyEx(binary, cv2.MORPH_OPEN, horizontal_kernel)
 
         total_pixels = header_region.shape[0] * header_region.shape[1]
         ink_ratio = np.count_nonzero(binary) / total_pixels if total_pixels > 0 else 0
 
-        has_lines = np.count_nonzero(horizontal_lines) > (header_region.shape[1] * FAX_LINE_COVERAGE_RATIO)
-        has_dense_text = FAX_INK_RANGE[0] < ink_ratio < FAX_INK_RANGE[1]
+        has_lines = np.count_nonzero(horizontal_lines) > (header_region.shape[1] * fax.line_coverage_ratio)
+        has_dense_text = fax.ink_range[0] < ink_ratio < fax.ink_range[1]
 
         return has_lines and has_dense_text
 
@@ -411,19 +475,19 @@ def _calculate_stroke_variance(gray):
         dist = cv2.distanceTransform(binary, cv2.DIST_L2, 5)
 
         stroke_widths = dist[dist > 0]
-        if len(stroke_widths) < MIN_STROKE_SAMPLES:
-            return DEFAULT_SCORE
+        if len(stroke_widths) < CFG.stroke_min_samples:
+            return CFG.default_score
 
         mean_width = np.mean(stroke_widths)
-        if mean_width < MIN_MEAN_STROKE_WIDTH:
-            return DEFAULT_SCORE
+        if mean_width < CFG.stroke_min_mean_width:
+            return CFG.default_score
 
         cv_score = np.std(stroke_widths) / mean_width
-        return min(cv_score / STROKE_CV_NORMALIZER, 1.0)
+        return min(cv_score / CFG.stroke_cv_normalizer, 1.0)
 
     except cv2.error as e:
         logger.debug("_calculate_stroke_variance failed: %s", e)
-        return DEFAULT_SCORE
+        return CFG.default_score
 
 
 def _calculate_line_regularity(gray):
@@ -438,11 +502,11 @@ def _calculate_line_regularity(gray):
         min_line_len = max(15, w // 33)
         max_line_gap = max(5, w // 100)
 
-        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=HOUGH_THRESHOLD,
+        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=CFG.line_hough_threshold,
                                 minLineLength=min_line_len, maxLineGap=max_line_gap)
 
-        if lines is None or len(lines) < MIN_HOUGH_LINES:
-            return DEFAULT_SCORE
+        if lines is None or len(lines) < CFG.line_min_hough_lines:
+            return CFG.default_score
 
         angles = []
         for line in lines:
@@ -452,14 +516,15 @@ def _calculate_line_regularity(gray):
                 angles.append(abs(angle))
 
         if not angles:
-            return DEFAULT_SCORE
+            return CFG.default_score
 
-        horizontal_count = sum(1 for a in angles if a < HORIZONTAL_ANGLE_TOLERANCE or a > (180 - HORIZONTAL_ANGLE_TOLERANCE))
+        tol = CFG.line_horizontal_angle_tolerance
+        horizontal_count = sum(1 for a in angles if a < tol or a > (180 - tol))
         return horizontal_count / len(angles)
 
     except cv2.error as e:
         logger.debug("_calculate_line_regularity failed: %s", e)
-        return DEFAULT_SCORE
+        return CFG.default_score
 
 
 def _calculate_angle_variance(gray):
@@ -481,13 +546,13 @@ def _calculate_angle_variance(gray):
                 angles.append(ellipse[2])
 
         if not angles:
-            return DEFAULT_ANGLE_VARIANCE
+            return CFG.default_angle_variance
 
         return np.var(angles)
 
     except cv2.error as e:
         logger.debug("_calculate_angle_variance failed: %s", e)
-        return DEFAULT_ANGLE_VARIANCE
+        return CFG.default_angle_variance
 
 
 def _calculate_edge_density(gray):
@@ -511,8 +576,8 @@ def _detect_form_structure(gray):
         h, w = gray.shape
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
 
-        kernel_w = max(MIN_FORM_KERNEL_SIZE, w // FORM_KERNEL_DIVISOR)
-        kernel_h = max(MIN_FORM_KERNEL_SIZE, h // FORM_KERNEL_DIVISOR)
+        kernel_w = max(CFG.form_min_kernel_size, w // CFG.form_kernel_divisor)
+        kernel_h = max(CFG.form_min_kernel_size, h // CFG.form_kernel_divisor)
 
         h_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (kernel_w, 1))
         v_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, kernel_h))
@@ -522,7 +587,7 @@ def _detect_form_structure(gray):
 
         total_pixels = h * w
         line_ratio = (h_lines + v_lines) / total_pixels if total_pixels > 0 else 0
-        return min(line_ratio / FORM_LINE_RATIO_NORMALIZER, 1.0)
+        return min(line_ratio / CFG.form_line_ratio_normalizer, 1.0)
 
     except cv2.error as e:
         logger.debug("_detect_form_structure failed: %s", e)
@@ -538,8 +603,8 @@ def _calculate_character_uniformity(gray):
         _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
         num_labels, _, stats, _ = cv2.connectedComponentsWithStats(binary, connectivity=8)
 
-        if num_labels < MIN_UNIFORM_COMPONENTS:
-            return DEFAULT_SCORE
+        if num_labels < CFG.uniformity_min_components:
+            return CFG.default_score
 
         heights = []
         for i in range(1, num_labels):
@@ -548,16 +613,16 @@ def _calculate_character_uniformity(gray):
             if 5 < h < gray.shape[0] // 3 and area > 20:
                 heights.append(h)
 
-        if len(heights) < MIN_UNIFORM_COMPONENTS:
-            return DEFAULT_SCORE
+        if len(heights) < CFG.uniformity_min_components:
+            return CFG.default_score
 
         mean_height = np.mean(heights)
         if mean_height < 1:
-            return DEFAULT_SCORE
+            return CFG.default_score
 
         cv_score = np.std(heights) / mean_height
-        return min(max(0, 1.0 - (cv_score / UNIFORMITY_CV_NORMALIZER)), 1.0)
+        return min(max(0, 1.0 - (cv_score / CFG.uniformity_cv_normalizer)), 1.0)
 
     except cv2.error as e:
         logger.debug("_calculate_character_uniformity failed: %s", e)
-        return DEFAULT_SCORE
+        return CFG.default_score

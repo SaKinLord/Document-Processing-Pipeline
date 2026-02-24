@@ -112,6 +112,13 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None) -> Dict[st
     """
     Apply all post-processing to OCR output (17 stages).
 
+    Mutation Contract:
+        All steps mutate element dicts **in-place** and must not create new
+        dict objects for existing elements.  Later steps (notably Step 16 —
+        ``build_table_cells``) depend on seeing text content already cleaned
+        by earlier steps.  Any refactor that copies element dicts will
+        silently break this dependency chain.
+
     Stages:
      1. Filter empty table/layout regions
      2. Normalize underscore fill-in fields
@@ -305,7 +312,7 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None) -> Dict[st
                         element["num_rows"] = max(c["row"] for c in cells) + 1
                         element["num_columns"] = max(c["col"] for c in cells) + 1
                         cell_count += len(cells)
-                    del element["structure"]
+                    element.pop("structure", None)
             if cell_count:
                 logger.info("  [table_cells] extracted %d cells", cell_count)
             else:
