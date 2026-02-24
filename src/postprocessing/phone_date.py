@@ -342,10 +342,6 @@ def normalize_phone_numbers(elements: List[Dict]) -> List[Dict]:
             if phone_type:
                 element["phone_type"] = phone_type
 
-            validation_result = validate_phone_number(content)
-            if validation_result['phones']:
-                element["phone_validation_status"] = validation_result['validation_status']
-
     return elements
 
 

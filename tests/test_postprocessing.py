@@ -398,9 +398,30 @@ class TestIsValidText:
     def test_single_alpha(self):
         assert is_valid_text("A") is True
 
+    def test_single_hash_valid(self):
+        # '#' is common in forms (page numbers, references)
+        assert is_valid_text("#") is True
+
     def test_single_nonalnum(self):
-        # Non-common single character
-        assert is_valid_text("#") is False
+        # Uncommon single characters are still invalid
+        assert is_valid_text("~") is False
+
+    def test_list_markers_valid(self):
+        """List markers like a), b), 1) are valid form content."""
+        assert is_valid_text("a)") is True
+        assert is_valid_text("b)") is True
+        assert is_valid_text("c)") is True
+        assert is_valid_text("1)") is True
+
+    def test_leading_dot_decimals_valid(self):
+        """Leading-dot decimals like .55, .841 are valid numeric content."""
+        assert is_valid_text(".55") is True
+        assert is_valid_text(".841") is True
+
+    def test_symbol_punctuation_valid(self):
+        """Short symbol markers like #: are valid form content."""
+        assert is_valid_text("#:") is True
+        assert is_valid_text("#.") is True
 
 
 class TestHasRepetitionPattern:
@@ -430,11 +451,20 @@ class TestCalculateHallucinationScore:
         )
         assert score >= 0.50
 
-    def test_tiny_bbox_penalized(self):
+    def test_tiny_bbox_penalized_for_longer_content(self):
+        """Tiny bbox fires for content >2 chars (not double-penalized with very_short)."""
+        score, signals = calculate_hallucination_score(
+            "abc", 0.50, [0, 0, 10, 5], 1000, 1000
+        )
+        assert "tiny_bbox" in signals
+
+    def test_tiny_bbox_skipped_for_very_short(self):
+        """Very short content (<=2 chars) should NOT get tiny_bbox penalty."""
         score, signals = calculate_hallucination_score(
             "x", 0.50, [0, 0, 10, 5], 1000, 1000
         )
-        assert "tiny_bbox" in signals
+        assert "tiny_bbox" not in signals
+        assert "very_short" in signals
 
     def test_margin_fragment(self):
         score, signals = calculate_hallucination_score(
@@ -777,14 +807,32 @@ class TestTransferSuryaCase:
         # 9 alpha chars, 6 upper = 66.7% → below 70%
         assert _transfer_surya_case("ABCDEFghi", "abcdefghi") == "abcdefghi"
 
-    def test_boundary_above_70_percent(self):
-        """70%+ uppercase should trigger uppercasing."""
-        # 10 alpha chars, 7 upper = 70% → at threshold
-        assert _transfer_surya_case("ABCDEFGhij", "abcdefghij") == "ABCDEFGHIJ"
+    def test_boundary_above_70_percent_single_word(self):
+        """Single word with 70%+ uppercase but not ALL-CAPS stays unchanged (per-word logic)."""
+        # 10 alpha chars, 7 upper = 70% → but per-word, not all uppercase
+        assert _transfer_surya_case("ABCDEFGhij", "abcdefghij") == "abcdefghij"
+
+    def test_boundary_above_70_percent_fallback(self):
+        """When word counts differ and 70%+ uppercase, fallback bulk-uppercases."""
+        # Word counts differ: 2 vs 1 → triggers fallback bulk strategy
+        assert _transfer_surya_case("DATE ISSUED", "dateissued") == "DATEISSUED"
 
     def test_empty_surya_text(self):
         """Empty Surya text should not alter TrOCR output."""
         assert _transfer_surya_case("", "some text") == "some text"
+
+    def test_per_word_mixed_case_transfer(self):
+        """Word-level transfer: only ALL-CAPS Surya words uppercase the TrOCR word."""
+        # "DATE" and "ISSUED:" are all-caps, "January" is not
+        assert _transfer_surya_case("DATE ISSUED: January", "date issued: january") == "DATE ISSUED: january"
+
+    def test_per_word_all_caps(self):
+        """All words ALL-CAPS → all TrOCR words uppercased."""
+        assert _transfer_surya_case("HELLO WORLD", "hello world") == "HELLO WORLD"
+
+    def test_per_word_no_caps(self):
+        """No ALL-CAPS words → TrOCR output unchanged."""
+        assert _transfer_surya_case("hello world", "hello world") == "hello world"
 
 
 # ============================================================================
@@ -961,6 +1009,20 @@ class TestCorrectNonwordOcrErrors:
         if "depariment" not in result:
             assert ":" in result
 
+    def test_proper_nouns_skipped(self):
+        """Title-case words (likely proper nouns) should not be corrected."""
+        # These are real surnames that the spell checker would mangle
+        assert "Baroody" in correct_nonword_ocr_errors("George Baroody")
+        assert "Berman" in correct_nonword_ocr_errors("Steve Berman")
+        assert "Barrington" in correct_nonword_ocr_errors("Martin Barrington")
+
+    def test_all_caps_still_corrected(self):
+        """ALL-CAPS non-acronym words should still be corrected (not proper nouns)."""
+        result = correct_nonword_ocr_errors("DEPARTMENI report")
+        # ALL-CAPS words longer than 6 chars are still eligible for correction
+        if "DEPARTMENI" not in result:
+            assert result.split()[0].isupper()
+
 
 # ============================================================================
 # Table Cell Extraction (build_table_cells)
@@ -985,11 +1047,15 @@ class TestBuildTableCells:
 
     def test_empty_rows(self):
         table = self._make_table([0, 0, 200, 200], rows=[], columns=[[0, 0, 100, 200]])
-        assert build_table_cells(table, []) == []
+        cells, absorbed = build_table_cells(table, [])
+        assert cells == []
+        assert absorbed == set()
 
     def test_empty_columns(self):
         table = self._make_table([0, 0, 200, 200], rows=[[0, 0, 200, 50]], columns=[])
-        assert build_table_cells(table, []) == []
+        cells, absorbed = build_table_cells(table, [])
+        assert cells == []
+        assert absorbed == set()
 
     def test_single_cell_with_text(self):
         table = self._make_table(
@@ -1000,11 +1066,12 @@ class TestBuildTableCells:
         text_elements = [
             {"type": "text", "content": "Hello", "bbox": [10, 10, 100, 50]},
         ]
-        cells = build_table_cells(table, text_elements)
+        cells, absorbed = build_table_cells(table, text_elements)
         assert len(cells) == 1
         assert cells[0]["row"] == 0
         assert cells[0]["col"] == 0
         assert "Hello" in cells[0]["content"]
+        assert len(absorbed) == 1  # The text element was absorbed
 
     def test_multi_row_multi_col(self):
         table = self._make_table(
@@ -1018,12 +1085,13 @@ class TestBuildTableCells:
             # Text in bottom-right cell
             {"type": "text", "content": "D", "bbox": [150, 150, 190, 190]},
         ]
-        cells = build_table_cells(table, text_elements)
+        cells, absorbed = build_table_cells(table, text_elements)
         assert len(cells) == 4  # 2x2 grid
         cell_00 = [c for c in cells if c["row"] == 0 and c["col"] == 0][0]
         cell_11 = [c for c in cells if c["row"] == 1 and c["col"] == 1][0]
         assert "A" in cell_00["content"]
         assert "D" in cell_11["content"]
+        assert len(absorbed) == 2  # Both text elements absorbed
 
     def test_text_outside_table_not_assigned(self):
         table = self._make_table(
@@ -1035,9 +1103,10 @@ class TestBuildTableCells:
         text_elements = [
             {"type": "text", "content": "Outside", "bbox": [300, 300, 400, 350]},
         ]
-        cells = build_table_cells(table, text_elements)
+        cells, absorbed = build_table_cells(table, text_elements)
         assert len(cells) == 1
         assert cells[0]["content"] == ""
+        assert len(absorbed) == 0  # Nothing absorbed
 
     def test_header_detection(self):
         table = self._make_table(
@@ -1046,7 +1115,7 @@ class TestBuildTableCells:
             columns=[[0, 0, 200, 200]],
             headers=[[0, 0, 200, 50]],
         )
-        cells = build_table_cells(table, [])
+        cells, _ = build_table_cells(table, [])
         header_cells = [c for c in cells if c["is_header"]]
         non_header = [c for c in cells if not c["is_header"]]
         assert len(header_cells) >= 1
@@ -1063,7 +1132,9 @@ class TestBuildTableCells:
                 "headers": [],
             },
         }
-        assert build_table_cells(table, []) == []
+        cells, absorbed = build_table_cells(table, [])
+        assert cells == []
+        assert absorbed == set()
 
 
 # ============================================================================

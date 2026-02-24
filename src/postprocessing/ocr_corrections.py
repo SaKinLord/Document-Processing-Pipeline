@@ -22,9 +22,9 @@ logger = logging.getLogger(__name__)
 
 # Characters commonly confused by OCR engines (visual similarity)
 OCR_CHAR_CONFUSIONS = {
-    'c': 'eoa',    'e': 'co',      'a': 'oe',     'o': 'ae0c',
+    'c': 'eoa',    'e': 'co',      'a': 'oe',     'o': 'ae0cd',
     'l': '1Ii',    '1': 'lI',      'I': 'l1',     'i': 'jl1t',
-    'n': 'rih',    'h': 'bn',      'b': 'h6',     'd': 'o',
+    'n': 'rihm',   'h': 'bn',      'b': 'h6p',    'd': 'o',
     'O': '0DQ',    '0': 'O',       'D': 'O',
     'S': '5$',     '5': 'S$',      '$': 'S5',
     'B': '8R',     '8': 'B',       'R': 'B',
@@ -139,6 +139,13 @@ def correct_nonword_ocr_errors(text: str, page_context: Optional[Set[str]] = Non
                 or (stripped.isupper() and len(stripped) <= 6)
                 or any(c.isdigit() for c in stripped)
                 or '/' in stripped or '-' in stripped):
+            corrected_words.append(word)
+            continue
+
+        # Skip title-case words (likely proper nouns: names, places, companies)
+        # The spell checker dictionary doesn't contain proper nouns, so it
+        # would "correct" Baroody→Broody, Berman→Barman, etc.
+        if stripped[0].isupper() and not stripped.isupper():
             corrected_words.append(word)
             continue
 

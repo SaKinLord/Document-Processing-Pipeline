@@ -330,8 +330,11 @@ def calculate_hallucination_score(
         width = bbox[2] - bbox[0]
         height = bbox[3] - bbox[1]
 
-        # Very small bbox
-        if width < BBOX_MIN_WIDTH or height < BBOX_MIN_HEIGHT:
+        # Very small bbox — but skip for very short content (1-2 chars) since
+        # a tiny bbox is *expected* for single characters and short values.
+        # The very_short signal already penalizes them; double-penalizing
+        # causes false positives on checkbox marks, form digits, list markers.
+        if (width < BBOX_MIN_WIDTH or height < BBOX_MIN_HEIGHT) and text_len > TEXT_VERY_SHORT_MAX:
             score += BBOX_TINY_WEIGHT
             signals.append("tiny_bbox")
         # Extremely tall aspect ratio (likely noise)
@@ -435,7 +438,18 @@ def is_valid_text(content: str) -> bool:
 
     # Single character (usually noise unless common)
     if len(content) == 1:
-        return content.isalnum() or content in ".,;:!?()[]{}\"'"
+        return content.isalnum() or content in "#.,;:!?()[]{}\"'"
+
+    # Short form patterns (2-3 chars) common in documents
+    # List markers: a), b), c), 1), 2), etc.
+    if re.match(r'^[a-zA-Z0-9]\)$', content):
+        return True
+    # Symbol-punctuation pairs: #:, #., etc.
+    if re.match(r'^[#@&*]+[.:;,]?$', content):
+        return True
+    # Leading-dot decimals: .55, .841, etc.
+    if re.match(r'^\.\d+$', content):
+        return True
 
     # Case-sensitive patterns — the case distinction is meaningful
     case_sensitive_patterns = [

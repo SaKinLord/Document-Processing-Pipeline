@@ -203,14 +203,27 @@ def is_bbox_too_large(bbox, width, height, label=None):
     Uses per-type thresholds from BBOX_AREA_THRESHOLDS.
     """
     x1, y1, x2, y2 = bbox
-    area = (x2 - x1) * (y2 - y1)
+    # Clamp to page bounds
+    x1 = max(0, x1)
+    y1 = max(0, y1)
+    x2 = min(width, x2)
+    y2 = min(height, y2)
 
+    box_width = x2 - x1
+    box_height = y2 - y1
+    if box_width <= 0 or box_height <= 0:
+        return True  # Degenerate bbox — treat as invalid
+
+    area = box_width * box_height
     total_area = width * height
     if total_area == 0:
         return False
 
     ratio = area / total_area
 
-    threshold = BBOX_AREA_THRESHOLDS.get(label.lower(), BBOX_AREA_THRESHOLDS["default"]) if label else BBOX_AREA_THRESHOLDS["default"]
+    threshold = (
+        BBOX_AREA_THRESHOLDS.get(label.lower(), BBOX_AREA_THRESHOLDS["default"])
+        if label else BBOX_AREA_THRESHOLDS["default"]
+    )
 
     return ratio > threshold

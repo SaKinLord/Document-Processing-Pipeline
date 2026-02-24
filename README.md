@@ -2,7 +2,7 @@
 
 A fully local, GPU-accelerated pipeline that converts complex documents — scanned forms, handwritten letters, faxes, mixed-content pages — into structured JSON. No cloud APIs, no external services.
 
-The system orchestrates **4 specialized AI models** (Florence-2, Surya OCR, TrOCR, Table Transformer) through a hybrid architecture that dynamically routes each text line to the right model based on document content. A 17-stage post-processing pipeline then cleans, validates, and structures the raw OCR output.
+The system orchestrates **4 specialized AI models** (Florence-2, Surya OCR, TrOCR, Table Transformer) through a hybrid architecture that dynamically routes each text line to the right model based on document content. A 18-step post-processing pipeline then cleans, validates, and structures the raw OCR output.
 
 **Built as a portfolio project** to demonstrate end-to-end ML system design: model selection, multi-model orchestration, heuristic classification, structured post-processing, and rigorous evaluation.
 
@@ -16,12 +16,13 @@ The system orchestrates **4 specialized AI models** (Florence-2, Surya OCR, TrOC
     *   **Table Transformer (DETR):** Table detection and structural extraction with validation scoring
     *   **Florence-2 (VLM):** Vision-language model for object detection, captioning, and phrase grounding (signatures, handwriting, logos, seals)
 *   **Multi-Stage Post-Processing:**
-    *   7-signal hallucination detection and removal
-    *   Generalizable non-word OCR correction (spell checker + OCR confusion matrix)
+    *   7-signal hallucination detection and removal (with short-content deduplication guard)
+    *   Generalizable non-word OCR correction (spell checker + OCR confusion matrix + proper noun guard)
+    *   Word-level case transfer from Surya to TrOCR (preserves mixed-case content)
     *   Decimal-dash confusion repair with page-level context detection
     *   Parenthesis repair for Surya artifacts
     *   Signature text replacement and garbage filtering
-    *   Structural table validation and cell-level content extraction
+    *   Structural table validation, cell-level content extraction, and table deduplication
     *   Phone number normalization and date validation
     *   Rotated margin text filtering (vertical Bates numbers)
 *   **Robust Pre-processing:** Adaptive denoising and deskewing via OpenCV with resolution-adaptive parameters
@@ -32,9 +33,9 @@ Evaluated on a 32-document test set spanning typed forms, handwritten letters, f
 
 | Metric | Value |
 |--------|-------|
-| Regression Tests | **30/32 passing (93.75%)** |
-| Average Flex WER | **10.0%** |
-| Average Flex CER | **7.4%** |
+| Regression Tests | **30/32 passing (93.8%)** |
+| Average Flex WER | **9.7%** |
+| Average Flex CER | **7.2%** |
 | Avg Processing Time | **~38s per document** (Google Colab T4 GPU) |
 | Total Pipeline Time | **~20 min for 32 documents** |
 
@@ -44,9 +45,9 @@ Flexible evaluation ignores punctuation and formatting differences (e.g., `12/10
 
 | Category | Docs | Pass Rate | Avg Flex WER | Avg Flex CER |
 |----------|:----:|:---------:|:------------:|:------------:|
-| Handwritten | 11 | **100%** (11/11) | 4.4% | 3.6% |
-| Typed | 18 | **89%** (16/18) | 12.6% | 12.9% |
-| Mixed | 3 | **100%** (3/3) | 14.7% | 11.4% |
+| Handwritten | 11 | **100%** (11/11) | 4.3% | 3.7% |
+| Typed | 18 | **89%** (16/18) | 12.2% | 12.6% |
+| Mixed | 3 | **100%** (3/3) | 14.7% | 11.3% |
 
 **Per-type pass/fail thresholds:**
 
@@ -58,7 +59,7 @@ Flexible evaluation ignores punctuation and formatting differences (e.g., `12/10
 
 ### Remaining Failures
 
-The 2 failing documents are both **Hazleton Laboratories "Project Sheet" forms** — dense multi-cell grid forms with stylized logo text, checkbox arrays, and handwritten fill-in fields within a heavily structured typed layout. These represent one of the hardest document archetypes for OCR pipelines. Potential improvements would include fine-tuned detection models for checkbox/form-field classification and logo-aware text recognition.
+The 2 failing documents are both **Hazleton Laboratories "Project Sheet" forms** — dense two-column grid forms with a stylized logo, checkbox arrays, and handwritten fill-in fields. The dominant issue is **reading order**: the OCR reads left-to-right across rows, interleaving content from two parallel columns, while the ground truth expects column-by-column flow. The text is mostly recognized correctly but sequenced differently, causing cascading WER alignment failures. Secondary issues include the stylized "HAZLETON" logo being misread and handwritten names ("D. Serota") being garbled by TrOCR. Potential improvements would include column-aware reading order detection, fine-tuned checkbox/form-field classification, and logo-aware text recognition.
 
 ## Architecture
 
@@ -103,7 +104,7 @@ The 2 failing documents are both **Hazleton Laboratories "Project Sheet" forms**
        Table Transformer + Florence-2 OD
                      |
                      v
-             POST-PROCESSING (17 stages)
+             POST-PROCESSING (18 steps)
                      |
                      v
                JSON OUTPUT
@@ -111,7 +112,7 @@ The 2 failing documents are both **Hazleton Laboratories "Project Sheet" forms**
 
 ### Post-Processing Pipeline
 
-The post-processing pipeline in `postprocess_output()` applies a sanitize pre-step followed by 17 sequential stages:
+The post-processing pipeline in `postprocess_output()` applies a sanitize pre-step followed by 18 sequential steps:
 
 | # | Stage | Description |
 |---|-------|-------------|
@@ -120,19 +121,20 @@ The post-processing pipeline in `postprocess_output()` applies a sanitize pre-st
 | 2 | Normalize underscores | Standardize form fields (`Name:____` -> `Name: ___`) |
 | 3 | Validate table structure | Score tables 0-100; remove if score < 50 |
 | 4 | Deduplicate layout regions | Remove duplicate regions by bbox |
-| 5 | Score hallucinations | 7-signal scoring; remove >= 0.50, flag > 0.30 |
+| 5 | Score hallucinations | 7-signal scoring; remove >= 0.50, flag > 0.30 (short-content bbox guard prevents false positives) |
 | 6 | Filter rotated margin text | Remove vertical Bates numbers at page edges |
 | 7 | Clean text content | Whitespace normalization, Unicode fixes, HTML/math markup stripping |
 | 8 | Classification override | If >=50% of text elements sourced from TrOCR, override page type to handwritten |
 | 9 | Strip TrOCR trailing periods | Remove spurious periods from TrOCR output (typed/mixed docs only, abbreviation-safe) |
 | 10 | Repair decimal-dash confusion | Page-level context detection; fix `.88` misread as `-88` |
 | 11 | Repair parentheses | Fix Surya's `BRANDS)` -> `BRAND(S)` pattern |
-| 12 | Non-word OCR correction | Generalizable spell checker + OCR character confusion matrix |
+| 12 | Non-word OCR correction | Generalizable spell checker + OCR confusion matrix (skips proper nouns) |
 | 13 | Replace signature text | Pattern-matched signature labels -> `(signature)` |
 | 14 | Filter signature garbage | Remove single-word text overlapping >50% with signature bboxes |
 | 15 | Remove duplicate words | Fix TrOCR beam search artifacts (`straight straight` -> `straight`) |
-| 16 | Extract table cells | Assign OCR text to Table Transformer's row/column grid |
+| 16 | Extract table cells + reorder | Assign OCR text to Table Transformer's row/column grid; remove absorbed text elements and reposition each table to its first absorbed element's index to preserve reading order |
 | 17 | Normalize phone numbers | Format phone numbers to `(xxx) xxx-xxxx`; detect fax vs phone |
+| 18 | Phone and date validation | Add validation flags to elements containing phone numbers or dates |
 
 ### Enhanced Document Classification
 
@@ -163,12 +165,14 @@ Text elements are scored using 7 weighted signals:
 | Confidence | 15% | Low OCR confidence increases score |
 | Text Length | 10% | Very short text (1-2 chars) is suspicious |
 | Character Patterns | 25% | Repeating chars, isolated digits, punctuation-only, unusual chars |
-| Bbox Size | 15% | Tiny bboxes or abnormal aspect ratios |
-| Valid Text Check | 15% | Not matching word/date/email/URL patterns |
+| Bbox Size | 15% | Tiny bboxes or abnormal aspect ratios (skipped for <=2 char content to avoid double-penalizing short text) |
+| Valid Text Check | 15% | Not matching word/date/email/URL/list-marker/decimal patterns |
 | Repetition | 10% | Consecutive or all-same repeated words |
 | Margin Position | 10% | Text at extreme left/right page edges |
 
 **Decision logic:** Score >= 0.50 -> **Remove**, Score > 0.30 -> **Flag**, Score <= 0.30 -> **Keep**
+
+**Short-content guard:** The `tiny_bbox` signal is suppressed for very short content (<=2 chars) because single characters and short values like checkbox marks ("X"), form digits ("4"), and list markers ("b)") naturally have small bounding boxes. Without this guard, the `very_short` + `tiny_bbox` signals would double-penalize legitimate form content.
 
 ### Table Validation
 
@@ -201,9 +205,12 @@ A single generalizable correction mechanism handles OCR errors without corpus-sp
 
 | Component | Scope | Logic |
 |-----------|-------|-------|
-| `pyspellchecker` | Detect non-words | Words not in English dictionary (min 5 chars, skips acronyms/digits) |
+| `pyspellchecker` | Detect non-words | Words not in English dictionary (min 5 chars, skips acronyms/digits/proper nouns) |
+| Proper noun guard | Skip title-case | Words starting with uppercase but not ALL-CAPS are assumed to be names/places and left unchanged |
 | OCR confusion matrix | Filter candidates | Only accept corrections differing by visually confusable characters (e.g., `c`↔`e`, `l`↔`1`, `n`↔`h`) |
 | Frequency ranking | Disambiguation | When multiple OCR-plausible candidates exist, pick the most common English word |
+
+The proper noun guard prevents the spell checker from "correcting" surnames and place names into common English words (e.g., `Baroody`->`Broody`, `Berman`->`Barman`). Since proper nouns aren't in the spell checker's dictionary, they would otherwise be treated as OCR errors.
 
 This approach is fully generalizable — it works on any English document without manual dictionary updates.
 
@@ -241,7 +248,7 @@ This approach is fully generalizable — it works on any English document withou
   ]
 }
 ```
-**Result:** 2.2% flex WER, 0.4% CER. Surya handles the printed form labels while TrOCR is routed in for the handwritten name fields.
+**Result:** 0.7% flex WER, 0.1% CER. Surya handles the printed form labels while TrOCR is routed in for the handwritten name fields.
 
 ### Table Detection (00922237)
 **Input:** Purchase requisition with structured tabular data
@@ -261,7 +268,7 @@ This approach is fully generalizable — it works on any English document withou
   ]
 }
 ```
-**Result:** 17.2% flex WER. Table structure correctly detected with row/column grid and header identification.
+**Result:** 9.8% flex WER. Table structure correctly detected with row/column grid and header identification.
 
 Use `python visualize_output.py` to generate annotated images with color-coded bounding boxes overlaid on the original documents (blue = Surya, orange = TrOCR, dark blue = table, purple = signature, red = hallucination).
 
@@ -284,6 +291,10 @@ This project went through several iterations. Key decisions made along the way:
 - **Florence-2 query batching:** Initially ran separate Florence-2 forward passes for "signature" and "handwritten text" detection. Combining both into a single phrase-grounding query (`"signature. handwritten text"`) saves ~2 seconds per page with no accuracy loss.
 - **Per-line routing > page-level classification:** Page-level classification alone misses handwritten fill-ins on typed forms. The Florence-2 phrase grounding + per-line TrOCR routing catches these regardless of the page-level label.
 - **Decimal-dash confusion is systematic:** Surya OCR consistently misreads leading decimal points as dashes (`.88` -> `-88`). A naive regex fix would break dates and negative numbers. The solution uses page-level context: only correct when the page already contains decimal numbers like `14.00` or `12.5`.
+- **Spell checkers corrupt proper nouns:** Dictionary-based OCR correction silently "corrects" surnames and place names into common words (`Baroody`->`Broody`, `Berman`->`Barman`). The fix: skip title-case words entirely, since proper nouns are capitalized in English and never appear in standard dictionaries.
+- **Hallucination scoring signals are correlated, not independent:** Short content (1-2 chars) always has a tiny bbox. Treating these as independent signals double-penalizes legitimate form content like checkbox marks and single digits. Gating the bbox signal on text length eliminates the false positives without weakening detection of actual garbage.
+- **Table cell extraction requires precise deduplication:** `build_table_cells()` assigns OCR text into table cells and returns the IDs of text elements it actually consumed. Only those specific elements are removed. An earlier approach using spatial bbox overlap (≥50%) caused catastrophic data loss on form documents where tables span most of the page — it deleted legitimate text that merely overlapped the table region without being part of any cell.
+- **Table element ordering matters for reading flow:** The document processor naturally appends table elements after all text elements (Table Transformer runs after OCR). When Step 16 absorbs text into table cells and removes the original text elements, the table stays at the end of the list — displacing its content from the middle of the document to after all footer text. The fix: reposition each table to the index of its first absorbed text element, preserving the natural reading order. This single change recovered 53% WER on one document (63.7% → 10.3%).
 
 ## Setup
 
@@ -416,7 +427,7 @@ Document-Processing-Pipeline/
 ├── src/
 │   ├── config.py                    # Centralized pipeline thresholds (routing, confidence, hallucination, table, signature)
 │   ├── processing_pipeline.py       # DocumentProcessor: model loading, per-page OCR routing
-│   ├── postprocessing/              # Post-processing pipeline (sanitize + 17 stages)
+│   ├── postprocessing/              # Post-processing pipeline (sanitize + 18 steps)
 │   │   ├── pipeline.py              # Orchestrator: postprocess_output() with per-step fault isolation
 │   │   ├── hallucination.py         # 7-signal hallucination scoring and removal
 │   │   ├── ocr_corrections.py       # Generalizable spell checker + OCR confusion matrix
@@ -471,8 +482,9 @@ All models load onto GPU if available, falling back to CPU.
 
 *   **English/US-only:** Spell correction, phone normalization, and date parsing assume English language and US formats. International documents would require locale-specific models and formatting rules.
 *   **Florence-2 bbox precision:** Phrase grounding returns coarse bounding boxes. In mixed documents, a handwriting region may extend over adjacent typed text, routing those lines through TrOCR unnecessarily. The net effect is still positive for handwriting recall.
-*   **Dense form layouts:** Documents with complex grid structures (checkboxes, many small fields, dense lines) produce fragmented OCR elements. The two failing test documents are both dense Hazleton Labs forms with stylized logos, checkbox arrays, and handwritten fill-ins.
-*   **Proper name accuracy:** Handwritten names in form fill-in fields are the weakest spot. Names like "Hamann", "Wigand", and "Baroody" are occasionally misread by 1-2 characters, as they aren't constrained by dictionary lookup.
+*   **Dense two-column form layouts:** Documents with parallel columns (e.g., the Hazleton Labs project sheets) produce interleaved reading order. The OCR reads left-to-right across rows, mixing left-column and right-column content, while ground truth expects column-by-column flow. Both remaining test failures are this archetype.
+*   **Proper name accuracy:** Handwritten names in form fill-in fields are the weakest spot. Names like "Hamann" and "Wigand" are occasionally misread by 1-2 characters at the raw OCR level. A proper noun guard prevents the spell checker from further corrupting correctly-read names, but upstream OCR errors on handwritten names remain.
+*   **Classification approach:** The document type classifier uses 8 hand-crafted image features with empirically tuned thresholds. It is not a trained model. Accuracy on new document domains may require threshold re-tuning. The post-OCR classification override (TrOCR-majority detection) provides a robust safety net.
 *   **Classification edge cases:** Some handwritten documents on clean white paper with uniform line spacing are initially misclassified as "typed." A post-OCR override corrects this: if >=50% of text elements were sourced from TrOCR, the page is reclassified as "handwritten."
 
 ## Future Improvements

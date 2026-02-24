@@ -49,7 +49,11 @@ METADATA_PATTERNS = [
 ]
 
 def extract_ocr_text(json_path):
-    """Extract all text content from OCR output JSON, filtering metadata."""
+    """Extract all text content from OCR output JSON, filtering metadata.
+
+    Reads both standalone text elements and text inside table cells so that
+    content moved into table structures by the pipeline is still counted.
+    """
     import re
     with open(json_path, 'r', encoding='utf-8') as f:
         data = json.load(f)
@@ -63,6 +67,12 @@ def extract_ocr_text(json_path):
                 is_metadata = any(re.match(p, content.lower().strip()) for p in METADATA_PATTERNS)
                 if not is_metadata:
                     text_elements.append(content)
+            elif element.get('type') == 'table' and element.get('cells'):
+                # Extract text from table cells
+                for cell in element['cells']:
+                    cell_content = cell.get('content', '').strip()
+                    if cell_content:
+                        text_elements.append(cell_content)
 
     return normalize_underscores(' '.join(text_elements))
 

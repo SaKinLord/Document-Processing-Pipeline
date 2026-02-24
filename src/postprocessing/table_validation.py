@@ -345,7 +345,7 @@ def filter_invalid_tables(elements: List[Dict]) -> List[Dict]:
 def build_table_cells(
     table_element: Dict,
     text_elements: List[Dict],
-) -> List[Dict]:
+) -> Tuple[List[Dict], set]:
     """Build cell grid from table structure and assign text content to cells.
 
     Uses the row/column bboxes from Table Transformer's structure recognition
@@ -358,9 +358,12 @@ def build_table_cells(
         text_elements: All text elements on the page.
 
     Returns:
-        List of cell dicts with ``row``, ``col``, ``bbox``, ``content``,
-        and ``is_header`` keys.  Returns empty list if structure has
-        0 rows or 0 columns.
+        Tuple of (cells, absorbed_ids) where:
+        - cells: List of cell dicts with ``row``, ``col``, ``bbox``,
+          ``content``, and ``is_header`` keys.  Returns empty list if
+          structure has 0 rows or 0 columns.
+        - absorbed_ids: Set of ``id()`` values for text elements that
+          contributed at least one word to a cell.
     """
     structure = table_element.get("structure", {})
     rows = structure.get("rows", [])
@@ -369,7 +372,7 @@ def build_table_cells(
     table_bbox = table_element.get("bbox", [])
 
     if not rows or not columns or len(table_bbox) != 4:
-        return []
+        return [], set()
 
     # Sort rows top-to-bottom, columns left-to-right (should already be sorted)
     rows = sorted(rows, key=lambda r: r["bbox"][1])
@@ -454,6 +457,8 @@ def build_table_cells(
             overlapping_texts.append(te)
 
     # Assign words to cells via center-point containment
+    # Track which text elements actually contributed content
+    absorbed_ids: set = set()
     for te in overlapping_texts:
         content = te.get("content", "")
         te_bbox = te.get("bbox", [])
@@ -479,6 +484,7 @@ def build_table_cells(
                         cell["content"] += " " + word
                     else:
                         cell["content"] = word
+                    absorbed_ids.add(id(te))
                     break
 
-    return cells
+    return cells, absorbed_ids

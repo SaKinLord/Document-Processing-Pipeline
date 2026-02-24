@@ -447,11 +447,30 @@ SURYA_UPPERCASE_RATIO = 0.70  # When ≥70% of Surya's alpha chars are uppercase
 
 
 def _transfer_surya_case(surya_text: str, trocr_text: str) -> str:
-    """Preserve ALL-CAPS casing from Surya when TrOCR wins the ensemble.
+    """Preserve casing from Surya when TrOCR wins the ensemble.
 
-    TrOCR tends to lowercase typed ALL-CAPS text (e.g. "DATE ISSUED" → "date issued").
-    If Surya's original text was predominantly uppercase, apply upper() to TrOCR's result.
+    Transfers case word-by-word: if a Surya word is ALL-CAPS, uppercase the
+    corresponding TrOCR word.  Falls back to full-string uppercasing when word
+    counts differ and Surya is predominantly uppercase.
     """
+    surya_words = surya_text.split()
+    trocr_words = trocr_text.split()
+
+    if not surya_words:
+        return trocr_text
+
+    # When word counts match, transfer per-word
+    if len(surya_words) == len(trocr_words):
+        result = []
+        for sw, tw in zip(surya_words, trocr_words):
+            sw_alpha = [c for c in sw if c.isalpha()]
+            if sw_alpha and all(c.isupper() for c in sw_alpha):
+                result.append(tw.upper())
+            else:
+                result.append(tw)
+        return ' '.join(result)
+
+    # Fallback: word counts differ — use the original bulk strategy
     alpha_chars = [c for c in surya_text if c.isalpha()]
     if not alpha_chars:
         return trocr_text

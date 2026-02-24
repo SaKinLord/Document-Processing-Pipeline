@@ -309,15 +309,53 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None) -> Dict[st
         try:
             text_elements = [e for e in elements if e.get("type") == "text"]
             cell_count = 0
+            all_absorbed: set = set()
+            absorbed_by_table: dict = {}  # id(table) -> set of absorbed text ids
             for element in elements:
                 if element.get("type") == "table" and "structure" in element:
-                    cells = build_table_cells(element, text_elements)
+                    cells, absorbed_ids = build_table_cells(element, text_elements)
                     if cells:
                         element["cells"] = cells
                         element["num_rows"] = max(c["row"] for c in cells) + 1
                         element["num_columns"] = max(c["col"] for c in cells) + 1
                         cell_count += len(cells)
+                        all_absorbed.update(absorbed_ids)
+                        if absorbed_ids:
+                            absorbed_by_table[id(element)] = absorbed_ids
                     element.pop("structure", None)
+            # Remove absorbed text elements and reposition table elements
+            # to preserve reading order.  The document processor appends
+            # table elements after all text, so without repositioning the
+            # cell content would appear at the end of the extracted text
+            # instead of where the table visually sits on the page.  Each
+            # table that absorbed text is moved to the position of its
+            # first absorbed element.
+            if all_absorbed:
+                count_before = len(elements)
+                # Find insertion target for each table that absorbed text
+                tables_to_move: set = set()
+                insert_at: dict = {}  # original_idx -> [table_elements]
+                for table_id, abs_ids in absorbed_by_table.items():
+                    for idx, e in enumerate(elements):
+                        if id(e) in abs_ids:
+                            table_elem = next(
+                                el for el in elements if id(el) == table_id
+                            )
+                            insert_at.setdefault(idx, []).append(table_elem)
+                            tables_to_move.add(table_id)
+                            break
+                # Rebuild: insert repositioned tables, drop absorbed text
+                new_elements: list = []
+                for idx, e in enumerate(elements):
+                    if idx in insert_at:
+                        new_elements.extend(insert_at[idx])
+                    if id(e) in all_absorbed:
+                        continue
+                    if id(e) in tables_to_move:
+                        continue
+                    new_elements.append(e)
+                elements = new_elements
+                _log_step("table_dedup", count_before, len(elements))
             if cell_count:
                 logger.info("  [table_cells] extracted %d cells", cell_count)
             else:
