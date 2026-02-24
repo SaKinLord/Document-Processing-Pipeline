@@ -19,11 +19,7 @@ from src.utils.bbox import bbox_overlap_ratio_of, bboxes_intersect
 from src.models.handwriting import HandwritingRecognizer
 from src.models.table import TableRecognizer
 from src.config import CONFIG
-from src.postprocessing import (
-    normalize_punctuation_spacing,
-    add_phone_validation_to_element,
-    add_date_validation_to_element,
-)
+from src.postprocessing import normalize_punctuation_spacing
 from src.postprocessing.normalization import _transfer_surya_case
 
 logger = logging.getLogger(__name__)
@@ -389,10 +385,6 @@ class DocumentProcessor:
             if bbox_y_normalized >= CONFIG.signature_region_ratio:
                 text_element["in_signature_region"] = True
                 text_element["transcription_uncertain"] = True
-
-        # Add phone and date validation flags
-        text_element = add_phone_validation_to_element(text_element)
-        text_element = add_date_validation_to_element(text_element)
 
         return text_element
 

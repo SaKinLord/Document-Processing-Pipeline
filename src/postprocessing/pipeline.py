@@ -22,7 +22,11 @@ from .table_validation import (
     build_table_cells,
 )
 from .ocr_corrections import correct_nonword_ocr_errors
-from .phone_date import normalize_phone_numbers
+from .phone_date import (
+    normalize_phone_numbers,
+    add_date_validation_to_element,
+    add_phone_validation_to_element,
+)
 from .signatures import (
     replace_signature_text,
     filter_signature_overlap_garbage,
@@ -110,7 +114,7 @@ def deduplicate_layout_regions(elements):
 
 def postprocess_output(output_data: Dict[str, Any], page_images=None) -> Dict[str, Any]:
     """
-    Apply all post-processing to OCR output (17 stages).
+    Apply all post-processing to OCR output (18 stages).
 
     Mutation Contract:
         All steps mutate element dicts **in-place** and must not create new
@@ -137,6 +141,7 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None) -> Dict[st
     15. Remove consecutive duplicate words (TrOCR beam search fix)
     16. Extract table cell content (assign text to structure grid)
     17. Normalize phone numbers
+    18. Phone and date validation flags (on cleaned text)
 
     Args:
         output_data: Raw OCR output dictionary
@@ -327,6 +332,17 @@ def postprocess_output(output_data: Dict[str, Any], page_images=None) -> Dict[st
             _log_step("phones", count_before, len(elements))
         except Exception:
             logger.exception("  [phones] failed — skipping step")
+
+        # Step 18: Phone and date validation flags
+        # Runs after all text cleaning so validation sees final content.
+        try:
+            for element in elements:
+                if element.get('type') == 'text' and element.get('content'):
+                    add_phone_validation_to_element(element)
+                    add_date_validation_to_element(element)
+            logger.debug("  [phone_date_validation] validation flags applied")
+        except Exception:
+            logger.exception("  [phone_date_validation] failed — skipping step")
 
         page["elements"] = elements
 
